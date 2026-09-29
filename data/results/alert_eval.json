@@ -1,0 +1,915 @@
+{
+  "generated_at": "2026-09-29T21:17:23+05:30",
+  "model": "openai/gpt-oss-120b",
+  "summary": {
+    "memory": {
+      "passed": 11,
+      "total": 12,
+      "recommended_bad_fix": 1
+    },
+    "baseline": {
+      "passed": 2,
+      "total": 12,
+      "recommended_bad_fix": 10
+    }
+  },
+  "results": [
+    {
+      "alert": "ALT-501",
+      "run": 1,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-20b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify current database activity",
+          "psql -h orders-db -U inventory_svc -c \"SELECT pid, state, wait_event_type, wait_event, query, state_change FROM pg_stat_activity WHERE state <> 'idle';\""
+        ],
+        [
+          "Terminate idle-in-transaction sessions",
+          "psql -h orders-db -U inventory_svc -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND now() - state_change > interval '60 seconds';\""
+        ],
+        [
+          "Stop the inventory-sync reconcile workflow temporarily",
+          "argo stop reconcile-full-x7k2p -n inventory"
+        ],
+        [
+          "Reduce reconcile workers for HYD-GACHIBOWLI-03",
+          "kubectl patch deployment inventory-sync -n inventory -p '{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"name\":\"inventory-sync\",\"resources\":{\"limits\":{\"cpu\":\"2\",\"memory\":\"4Gi\"}}}]}}}'"
+        ],
+        [
+          "Verify HikariCP pool status after mitigation",
+          "curl -s http://checkout-api:8080/actuator/metrics/hikaricp.connections | jq '.data[] | select(.name==\"hikaricp.connections.active\")'"
+        ]
+      ],
+      "cited": [
+        "INC-2104",
+        "INC-2282",
+        "INC-2291"
+      ]
+    },
+    {
+      "alert": "ALT-501",
+      "run": 1,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "idle.in.transaction|pg_terminate_backend|idle session"
+      ],
+      "recommended_bad_fix": [
+        "Increase HikariCP max pool size for checkout-api"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Check current DB connection limits and pool usage",
+          "psql -h <rds-endpoint> -U admin -c \"SELECT max_conn, used, reserved FROM pg_stat_activity;\""
+        ],
+        [
+          "Temporarily reduce inventory-sync parallelism",
+          "kubectl -n inventory-sync set env deployment/inventory-sync WORKER_COUNT=4 --record"
+        ],
+        [
+          "Increase HikariCP max pool size for checkout-api",
+          "kubectl -n checkout-api edit configmap checkout-api-config && set hikari.maximumPoolSize=80"
+        ],
+        [
+          "Add connection pool metrics alert for waiting threads > 100",
+          "Create Grafana alert rule on hikari_waiting_threads metric > 100 for 5m"
+        ],
+        [
+          "Rollback inventory-sync v3.12.0 if mitigation fails",
+          "kubectl -n inventory-sync rollout undo deployment/inventory-sync --to-revision=2"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-501",
+      "run": 2,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify current DB connection usage and lock holders",
+          "kubectl -n platform exec -it $(kubectl get pod -l app=orders-db -o jsonpath='{.items[0].metadata.name}') -- psql -h orders-db -U <readonly_user> -c \"SELECT pid, usename, state, query_start, now() - query_start AS duration, query FROM pg_stat_activity WHERE state <> 'idle' ORDER BY duration DESC;\""
+        ],
+        [
+          "Terminate idle\u2011in\u2011transaction and long\u2011running lock sessions",
+          "kubectl -n platform exec -it $(kubectl get pod -l app=orders-db -o jsonpath='{.items[0].metadata.name}') -- psql -h orders-db -U <admin_user> -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND now() - state_change > interval '30 seconds';\" && psql -h orders-db -U <admin_user> -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query LIKE '%stock_levels%' AND now() - query_start > interval '30 seconds';\""
+        ],
+        [
+          "Throttle inventory\u2011sync reconcile workers back to safe level",
+          "kubectl -n inventory set env deployment/inventory-sync RECONCILE_WORKERS=4 --record"
+        ],
+        [
+          "If latency remains high, rollback inventory\u2011sync deployment to previous version",
+          "argocd app rollback inventory-sync v3.11.0 --hard"
+        ]
+      ],
+      "cited": [
+        "INC-2104",
+        "INC-2282",
+        "INC-2291",
+        "INC-2317"
+      ]
+    },
+    {
+      "alert": "ALT-501",
+      "run": 2,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "idle.in.transaction|pg_terminate_backend|idle session"
+      ],
+      "recommended_bad_fix": [
+        "Increase HikariCP pool size for checkout-api"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Throttle inventory-sync workers",
+          "kubectl -n inventory-sync scale deployment inventory-sync --replicas=4"
+        ],
+        [
+          "Increase HikariCP pool size for checkout-api",
+          "kubectl -n checkout-api set env deployment checkout-api HIKARI_MAX_POOL_SIZE=80"
+        ],
+        [
+          "Check PostgreSQL max_connections and role limits",
+          "psql -h orders-db.cluster-xxxx.ap-south-1.rds.amazonaws.com -U admin -c \"SHOW max_connections; SELECT usename, usesysid, rolconnlimit FROM pg_roles;\""
+        ],
+        [
+          "Identify long\u2011running transactions from inventory-sync",
+          "psql -c \"SELECT pid, usename, state, query_start, now() - query_start AS duration, query FROM pg_stat_activity WHERE state <> 'idle' ORDER BY duration DESC LIMIT 20;\""
+        ],
+        [
+          "Temporarily route traffic away from checkout-api",
+          "kubectl -n ingress patch virtualservice checkout-api -p '{\"spec\":{\"http\":[{\"route\":[{\"destination\":{\"host\":\"checkout-api-canary\",\"subset\":\"stable\"}}]}]}}'"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-501",
+      "run": 3,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Check DB connection usage and lock holders",
+          "kubectl exec -n db $(kubectl get pod -l app=orders-db -o name) -- psql -h orders-db -U <readonly_user> -c \"SELECT usename, count(*) FROM pg_stat_activity GROUP BY usename; SELECT pid, usename, state, query_start, now()-query_start AS duration, query FROM pg_stat_activity WHERE state <> 'idle' AND query ILIKE '%stock_levels%';\""
+        ],
+        [
+          "Terminate idle\u2011in\u2011transaction sessions for inventory_svc role",
+          "kubectl exec -n db $(kubectl get pod -l app=orders-db -o name) -- psql -h orders-db -U <admin_user> -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='inventory_svc' AND state='idle in transaction' AND now()-state_change > interval '30 seconds';\""
+        ],
+        [
+          "Temporarily reduce inventory\u2011sync parallelism",
+          "kubectl -n inventory-sync set env deployment/inventory-sync RECONCILE_WORKERS=4 --record"
+        ],
+        [
+          "Set idle_in_transaction_session_timeout for inventory_svc role",
+          "kubectl exec -n db $(kubectl get pod -l app=orders-db -o name) -- psql -h orders-db -U <admin_user> -c \"ALTER ROLE inventory_svc SET idle_in_transaction_session_timeout = '60s';\""
+        ],
+        [
+          "Rollback inventory\u2011sync deployment to previous version (v3.11.x) if lock contention persists",
+          "argocd app rollback inventory-sync --revision v3.11.0"
+        ]
+      ],
+      "cited": [
+        "INC-2104",
+        "INC-2291",
+        "INC-2317"
+      ]
+    },
+    {
+      "alert": "ALT-501",
+      "run": 3,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "idle.in.transaction|pg_terminate_backend|idle session"
+      ],
+      "recommended_bad_fix": [
+        "Scale up HikariCP pool for checkout-api"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Scale up HikariCP pool for checkout-api",
+          "kubectl -n checkout set env deployment/checkout-api HIKARI_MAX_POOL_SIZE=80"
+        ],
+        [
+          "Temporarily reduce inventory-sync parallelism",
+          "kubectl -n inventory-sync set env deployment/inventory-sync RECONCILE_WORKERS=4"
+        ],
+        [
+          "Check RDS max_connections and current usage",
+          "psql -h <orders-db-endpoint> -U admin -c \"SHOW max_connections; SELECT count(*) FROM pg_stat_activity;\""
+        ],
+        [
+          "Identify long-running queries / lock contention on stock_levels",
+          "psql -h <orders-db-endpoint> -U admin -c \"SELECT pid, age(query_start), query FROM pg_stat_activity WHERE state='active' AND query LIKE '%stock_levels%';\""
+        ],
+        [
+          "Add a circuit breaker / retry backoff in checkout-api for DB failures",
+          ""
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-502",
+      "run": 1,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay connectivity and latency",
+          "kubectl exec -n payments $(kubectl get pod -n payments -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w \"%{time_total}\\n\" https://novapay.example.com/health"
+        ],
+        [
+          "Reroute all UPI traffic to secondary PSP UPIxpress",
+          "flagship set upi_psp_routing 'upixpress:100'"
+        ],
+        [
+          "Monitor breaker state and success rate after reroute",
+          "kubectl logs -l app=payments-gateway -c gateway --since=5m | grep breaker"
+        ],
+        [
+          "Investigate NovaPay service degradation",
+          "kubectl exec -n payments $(kubectl get pod -n payments -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s https://novapay.example.com/metrics | grep latency"
+        ],
+        [
+          "Create post\u2011mortem action item to implement automatic failover on PSP breaker open",
+          ""
+        ]
+      ],
+      "cited": [
+        "INC-2150",
+        "INC-2233",
+        "INC-2340"
+      ]
+    },
+    {
+      "alert": "ALT-502",
+      "run": 1,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [],
+      "recommended_bad_fix": [
+        "Increase timeout and retry settings for NovaPay collect"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay endpoint health",
+          "kubectl exec -n payments $(kubectl get pod -n payments -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w \"%{http_code} %{time_total}\\n\" https://novapay.example.com/health"
+        ],
+        [
+          "Increase timeout and retry settings for NovaPay collect",
+          ""
+        ],
+        [
+          "Temporarily route new UPI requests to UPIxpress",
+          "kubectl -n payments patch configmap payment-psp-preferences -p '{\"data\":{\"primary\":\"UPIxpress\",\"fallback\":\"NovaPay\"}}'"
+        ],
+        [
+          "Alert NovaPay support team",
+          ""
+        ],
+        [
+          "Monitor breaker state and success rate",
+          "grafana-cli alert list | grep 'UPI success rate'"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-502",
+      "run": 2,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay breaker state and recent errors",
+          "kubectl -n payments logs deployment/payments-gateway -c gateway --since=5m | grep 'breaker state' && kubectl -n payments logs deployment/payments-gateway -c gateway --since=5m | grep 'psp call timeout'"
+        ],
+        [
+          "Reroute 100% of UPI traffic to secondary PSP UPIxpress",
+          "flagship set upi_psp_routing 'upixpress:100'"
+        ],
+        [
+          "Verify traffic shift took effect and monitor success rate",
+          "curl -s http://monitoring.internal/metrics/upi_success_rate | tail -n 5"
+        ],
+        [
+          "Investigate NovaPay health (network, upstream service, latency)",
+          "kubectl -n payments exec -it $(kubectl -n payments get pod -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s http://novapay.internal/healthz"
+        ],
+        [
+          "Plan safe rollback of NovaPay routing after issue resolution",
+          "flagship set upi_psp_routing 'novapay:100,upixpress:0'"
+        ]
+      ],
+      "cited": [
+        "INC-2150",
+        "INC-2233",
+        "INC-2340"
+      ]
+    },
+    {
+      "alert": "ALT-502",
+      "run": 2,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [],
+      "recommended_bad_fix": [
+        "Increase timeout and retry settings for NovaPay collect"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay endpoint health",
+          "kubectl exec -n payments $(kubectl get pod -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w \"%{http_code} %{time_total}\\n\" https://novapay.api/payments/collect/health"
+        ],
+        [
+          "Increase timeout and retry settings for NovaPay collect",
+          "kubectl set env deployment/payments-gateway NOVAPAY_COLLECT_TIMEOUT=15000 NOVAPAY_RETRY_COUNT=3"
+        ],
+        [
+          "Temporarily route new UPI transactions to UPIxpress",
+          "kubectl patch configmap payments-gateway-config -n payments -p '{\"data\":{\"preferred_psp\":\"UPIxpress\"}}'"
+        ],
+        [
+          "Alert NovaPay support team",
+          ""
+        ],
+        [
+          "Monitor circuit breaker state and success rate after changes",
+          "watch -n 30 \"curl -s http://prometheus-server/api/v1/query?query=breaker_state{psp='novapay'}\""
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-502",
+      "run": 3,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay health and breaker metrics",
+          "kubectl -n payments get pod -l app=payments-gateway -o jsonpath='{.items[*].metadata.name}' | xargs -n1 -I{} kubectl logs {} -c gateway --since=5m | grep 'breaker state' && curl -s http://nova-pay.internal/healthz"
+        ],
+        [
+          "Reroute 100% of UPI traffic to secondary PSP UPIxpress",
+          "flagship set upi_psp_routing 'upixpress:100'"
+        ],
+        [
+          "Monitor UPI success rate and breaker state after routing",
+          "watch -n 30 \"curl -s http://monitoring.internal/api/metrics | grep upi_success_rate\""
+        ],
+        [
+          "Create a post\u2011mortem ticket to investigate NovaPay latency root cause",
+          ""
+        ]
+      ],
+      "cited": [
+        "INC-2150",
+        "INC-2233",
+        "INC-2340"
+      ]
+    },
+    {
+      "alert": "ALT-502",
+      "run": 3,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "upi_psp_routing|upixpress"
+      ],
+      "recommended_bad_fix": [
+        "Temporarily increase timeout for NovaPay collect calls"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify NovaPay endpoint health",
+          "kubectl exec -n payments $(kubectl get pod -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- curl -s -o /dev/null -w \"%{http_code}\" https://novapay.example.com/health"
+        ],
+        [
+          "Check network latency to NovaPay",
+          "kubectl exec -n payments $(kubectl get pod -l app=payments-gateway -o jsonpath='{.items[0].metadata.name}') -- ping -c 5 novapay.example.com"
+        ],
+        [
+          "Temporarily increase timeout for NovaPay collect calls",
+          "kubectl set env deployment/payments-gateway NOVAPAY_COLLECT_TIMEOUT=15000"
+        ],
+        [
+          "Fallback to alternative PSP (UPIExpress) for new transactions",
+          "kubectl rollout pause deployment/payments-gateway && kubectl patch configmap payment-psp-config -p '{\"data\":{\"primary_psp\":\"UPIExpress\"}}' && kubectl rollout resume deployment/payments-gateway"
+        ],
+        [
+          "Alert NovaPay support team",
+          ""
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-503",
+      "run": 1,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Identify the offending offset",
+          "kubectl -n inventory exec -it $(kubectl -n inventory get pod -l app=inventory-sync-consumer -o jsonpath='{.items[0].metadata.name}') -- bash -c \"kafka-consumer-groups.sh --bootstrap-server kafka-broker:9092 --describe --group inventory-sync\""
+        ],
+        [
+          "Skip the poison offset to DLQ",
+          "kafka-dlq-skip --topic inventory.updates --partition 1 --offset <offending_offset> --to-dlq"
+        ],
+        [
+          "Verify consumers recover and lag drains",
+          "kubectl -n inventory get pods -l app=inventory-sync-consumer && kubectl -n inventory logs -l app=inventory-sync-consumer -c consumer --tail=20"
+        ],
+        [
+          "Patch protobuf decoder / validate WMS payloads",
+          "Create a PR to add validation for incoming protobuf messages and update the WMS integration library to handle the new firmware version. Deploy after verification."
+        ],
+        [
+          "Notify inventory-sync on\u2011call owner",
+          "Page Arjun Mehta (inventory-sync owner) via PagerDuty."
+        ]
+      ],
+      "cited": [
+        "INC-2178",
+        "INC-2266"
+      ]
+    },
+    {
+      "alert": "ALT-503",
+      "run": 1,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "dlq|dead.letter|kafka-dlq-skip"
+      ],
+      "recommended_bad_fix": [
+        "Reset consumer offsets for partition 1 to the last committed offset"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Check recent deployment diff for inventory-sync service",
+          ""
+        ],
+        [
+          "Roll back inventory-sync to previous stable image",
+          "kubectl rollout undo deployment/inventory-sync -n prod"
+        ],
+        [
+          "Temporarily increase consumer replica count and disable processing for the problematic warehouse",
+          "kubectl scale deployment/inventory-sync --replicas=8 -n prod && kubectl patch configmap inventory-sync-config -p '{\"disable_warehouses\":[\"HYD-GACHIBOWLI-03\"]}'"
+        ],
+        [
+          "Collect core dump and protobuf version info from a crashed pod",
+          "kubectl exec -it inventory-sync-consumer-4 -- bash -c 'gdb -c /var/log/core.* && python -c \"import google.protobuf; print(google.protobuf.__version__)\"'"
+        ],
+        [
+          "Reset consumer offsets for partition 1 to the last committed offset",
+          "kubectl exec -it kafka-client -- kafka-consumer-groups --bootstrap-server broker:9092 --group inventory-sync --reset-offsets --to-offset <last_committed> --partition 1 --execute"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-503",
+      "run": 2,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Identify offending offset",
+          "kubectl logs deployment/inventory-sync-consumer -n inventory --tail=200 | grep -i 'Segmentation fault' | grep -o 'offset=[0-9]*' | head -1"
+        ],
+        [
+          "Skip poison offset to DLQ",
+          "kafka-dlq-skip --topic inventory.updates --partition 1 --offset <off> --to-dlq"
+        ],
+        [
+          "Verify consumer recovery",
+          "kubectl get pods -n inventory -l app=inventory-sync-consumer && kubectl logs -l app=inventory-sync-consumer -n inventory | grep -i 'lag' | tail -5"
+        ],
+        [
+          "Patch SKU validator / protobuf decoder if needed",
+          "Open a PR to update the protobuf schema handling for the new warehouse version and deploy after verification."
+        ]
+      ],
+      "cited": [
+        "INC-2104",
+        "INC-2178",
+        "INC-2266"
+      ]
+    },
+    {
+      "alert": "ALT-503",
+      "run": 2,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "dlq|dead.letter|kafka-dlq-skip"
+      ],
+      "recommended_bad_fix": [
+        "Increase consumer pod replica count to handle lag after fix"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Check recent deployment and library versions",
+          "kubectl rollout history deployment/inventory-sync -n prod"
+        ],
+        [
+          "Temporarily pause consumption for the problematic partition",
+          "kubectl exec -it $(kubectl get pod -l app=inventory-sync -n prod -o name | head -n1) -n prod -- bash -c \"python manage.py pause_consumer --topic inventory.updates --partition 1\""
+        ],
+        [
+          "Roll back to previous stable image of inventory-sync",
+          "kubectl set image deployment/inventory-sync inventory-sync=repo/inventory-sync:stable-2026-09-20 -n prod"
+        ],
+        [
+          "Validate protobuf schema compatibility",
+          "python -c \"import inventory_pb2; print(inventory_pb2.InventoryUpdate().DESCRIPTOR)\""
+        ],
+        [
+          "Increase consumer pod replica count to handle lag after fix",
+          "kubectl scale deployment/inventory-sync --replicas=6 -n prod"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-503",
+      "run": 3,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Identify the offending offset",
+          "kubectl exec -n inventory $(kubectl get pod -l app=inventory-sync-consumer -o name | head -n1) -- kafka-consumer-groups.sh --bootstrap-server kafka-broker:9092 --describe --group inventory-sync-consumer-group"
+        ],
+        [
+          "Skip the poison offset to DLQ",
+          "kafka-dlq-skip --topic inventory.updates --partition 1 --offset <offending_offset> --to-dlq"
+        ],
+        [
+          "Verify lag drains and pods recover",
+          "kubectl get pods -n inventory -l app=inventory-sync-consumer -w && kafka-consumer-groups.sh --bootstrap-server kafka-broker:9092 --describe --group inventory-sync-consumer-group"
+        ],
+        [
+          "If lag does not drain, roll back the last deployment (within 6h)",
+          "kubectl rollout undo deployment/inventory-sync-consumer -n inventory"
+        ]
+      ],
+      "cited": [
+        "INC-2104",
+        "INC-2178",
+        "INC-2266"
+      ]
+    },
+    {
+      "alert": "ALT-503",
+      "run": 3,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "dlq|dead.letter|kafka-dlq-skip"
+      ],
+      "recommended_bad_fix": [
+        "Scale up a temporary replica of inventory-sync with a previous stable image"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Scale up a temporary replica of inventory-sync with a previous stable image",
+          "kubectl -n basketbolt set image deployment/inventory-sync inventory-sync=repo/inventory-sync:stable && kubectl -n basketbolt scale deployment/inventory-sync --replicas=6"
+        ],
+        [
+          "Collect a core dump and stack trace from a crashing pod",
+          "kubectl -n basketbolt exec -it inventory-sync-consumer-4 -- gdb -batch -ex 'bt' -ex 'quit' /usr/local/bin/python3"
+        ],
+        [
+          "Rollback the last deployment of inventory-sync (if any) to the prior version",
+          "kubectl -n basketbolt rollout undo deployment/inventory-sync"
+        ],
+        [
+          "Validate protobuf schema compatibility for the new warehouse data",
+          "python - <<'PY'\nimport protobuf_schema\nprint(protobuf_schema.validate_message(sample_message))\nPY"
+        ],
+        [
+          "Increase consumer pod resource limits temporarily",
+          "kubectl -n basketbolt set resources deployment/inventory-sync --limits=cpu=500m,memory=1Gi --requests=cpu=250m,memory=512Mi"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-504",
+      "run": 1,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 1,
+      "steps": [
+        [
+          "Verify node-local-dns DaemonSet scheduling",
+          "kubectl get ds node-local-dns -n kube-system -o jsonpath='{.spec.template.spec.nodeSelector}'"
+        ],
+        [
+          "Patch node-local-dns DaemonSet to allow ng-general-v5",
+          "kubectl patch ds node-local-dns -n kube-system --type=json -p '[{\"op\":\"add\",\"path\":\"/spec/template/spec/nodeSelector/ng-general-v5\",\"value\":\"\"}]'"
+        ],
+        [
+          "Verify node-local-dns pods are running on all ng-general-v5 nodes",
+          "kubectl get pods -n kube-system -l k8s-app=node-local-dns -o wide | grep ng-general-v5"
+        ]
+      ],
+      "cited": [
+        "INC-2125",
+        "INC-2160",
+        "INC-2305"
+      ]
+    },
+    {
+      "alert": "ALT-504",
+      "run": 1,
+      "mode": "baseline",
+      "passed": false,
+      "missing": [
+        "node-local-dns|nodelocal|daemonset"
+      ],
+      "recommended_bad_fix": [
+        "Scale CoreDNS deployment temporarily"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Check CoreDNS pod health and metrics on ng-general-v5",
+          "kubectl -n kube-system get pods -l k8s-app=kube-dns -o wide && kubectl -n kube-system top pods -l k8s-app=kube-dns"
+        ],
+        [
+          "Scale CoreDNS deployment temporarily",
+          "kubectl -n kube-system scale deployment coredns --replicas=5"
+        ],
+        [
+          "Verify node DNS configuration on ng-general-v5",
+          "kubectl get nodes -l karpenter.sh/nodepool=ng-general-v5 -o jsonpath='{.items[*].metadata.name}' | xargs -I{} kubectl debug node/{} --image=busybox -- chroot /host cat /etc/resolv.conf"
+        ],
+        [
+          "Restart CoreDNS pods to pick up any config changes",
+          "kubectl -n kube-system rollout restart deployment coredns"
+        ],
+        [
+          "If DNS still fails, fallback to external DNS (e.g., 8.8.8.8) via CoreDNS ConfigMap",
+          "kubectl -n kube-system edit configmap coredns && add forward . 8.8.8.8"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-504",
+      "run": 2,
+      "mode": "memory",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify node\u2011local\u2011dns DaemonSet scheduling on ng-general-v5",
+          "kubectl get ds node-local-dns -n kube-system -o jsonpath='{.spec.template.spec.nodeSelector}'"
+        ],
+        [
+          "Check DaemonSet pod status on the new nodes",
+          "kubectl get pods -n kube-system -l k8s-app=node-local-dns -o wide | grep ng-general-v5"
+        ],
+        [
+          "Patch node\u2011local\u2011dns DaemonSet to remove restrictive nodeSelector",
+          "kubectl patch ds node-local-dns -n kube-system --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/nodeSelector\"}]'"
+        ],
+        [
+          "Verify DNS resolution after patch",
+          "kubectl exec -n default $(kubectl get pod -l app=checkout-api -o name | head -n1) -- nslookup orders-db.internal.basketbolt.in"
+        ],
+        [
+          "Add a post\u2011deployment verification step to the Karpenter migration runbook",
+          "Update runbook to include: 'kubectl wait --for=condition=Ready pod -l k8s-app=node-local-dns -n kube-system --timeout=2m' and verify DNS health checks."
+        ]
+      ],
+      "cited": [
+        "INC-2160",
+        "INC-2305"
+      ]
+    },
+    {
+      "alert": "ALT-504",
+      "run": 2,
+      "mode": "baseline",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify CoreDNS pod placement and health",
+          "kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide"
+        ],
+        [
+          "Check network connectivity from a pod on ng-general-v5 to the DNS service",
+          "kubectl run -i --rm debug --image=busybox --restart=Never -- /bin/sh -c \"nslookup kubernetes.default.svc.cluster.local 169.254.20.10\""
+        ],
+        [
+          "Inspect security group rules for ng-general-v5",
+          "aws ec2 describe-security-groups --group-ids <sg-id-of-ng-general-v5>"
+        ],
+        [
+          "Review Bottlerocket kernel modules for iptables/NAT",
+          "ssh into a Bottlerocket node (using ecs-cli) and run \"sudo modprobe iptables_nat\"; check /etc/sysctl.conf for net.ipv4.ip_forward=1"
+        ],
+        [
+          "Temporarily cordon and drain ng-general-v5 nodes",
+          "kubectl cordon $(kubectl get nodes -l nodegroup=ng-general-v5 -o name); kubectl drain $(kubectl get nodes -l nodegroup=ng-general-v5 -o name) --ignore-daemonsets --force"
+        ]
+      ],
+      "cited": []
+    },
+    {
+      "alert": "ALT-504",
+      "run": 3,
+      "mode": "memory",
+      "passed": false,
+      "missing": [],
+      "recommended_bad_fix": [
+        "If DaemonSet already present, temporarily scale CoreDNS to 6 replicas"
+      ],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify node-local-dns DaemonSet scheduling on ng-general-v5",
+          "kubectl get ds node-local-dns -n kube-system -o jsonpath='{.spec.template.spec.nodeSelector}' && kubectl get pods -n kube-system -l k8s-app=node-local-dns -o wide"
+        ],
+        [
+          "Patch node-local-dns DaemonSet to allow scheduling on ng-general-v5",
+          "kubectl patch ds node-local-dns -n kube-system --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/nodeSelector\"}]'"
+        ],
+        [
+          "Confirm DNS recovery",
+          "kubectl exec -n kube-system <any-pod> -- nslookup orders-db.internal.basketbolt.in 169.254.20.10 && curl -s http://checkout-api/healthz"
+        ],
+        [
+          "If DaemonSet already present, temporarily scale CoreDNS to 6 replicas",
+          "kubectl scale deploy/coredns -n kube-system --replicas=6"
+        ]
+      ],
+      "cited": [
+        "INC-2160",
+        "INC-2282",
+        "INC-2305"
+      ]
+    },
+    {
+      "alert": "ALT-504",
+      "run": 3,
+      "mode": "baseline",
+      "passed": true,
+      "missing": [],
+      "recommended_bad_fix": [],
+      "cited_ok": true,
+      "has_actions": true,
+      "model": "openai/gpt-oss-120b",
+      "guard_moved": 0,
+      "steps": [
+        [
+          "Verify CoreDNS pod placement and logs on ng-general-v5 nodes",
+          "kubectl get pods -n kube-system -l k8s-app=kube-dns -o wide && kubectl logs -n kube-system -l k8s-app=kube-dns -c coredns"
+        ],
+        [
+          "Test DNS resolution from a pod on ng-general-v5",
+          "kubectl run -i --rm debug-pod --image=busybox --restart=Never --overrides='{ \"spec\": { \"nodeName\": \"<node-from-ng-general-v5>\" } }' -- nslookup orders-db.internal.basketbolt.in"
+        ],
+        [
+          "Check node security group inbound/outbound rules for UDP/53",
+          "aws ec2 describe-security-groups --group-ids <sg-id-of-ng-general-v5> --query 'SecurityGroups[*].IpPermissions'"
+        ],
+        [
+          "If node-local DNS is unreachable, disable node-local DNS for the new node pool",
+          "kubectl edit cm kube-dns -n kube-system   # set enableNodeLocalDNS: false"
+        ],
+        [
+          "Redeploy CoreDNS with proper tolerations/affinity for Bottlerocket nodes",
+          "kubectl rollout restart deployment coredns -n kube-system"
+        ]
+      ],
+      "cited": []
+    }
+  ]
+}
