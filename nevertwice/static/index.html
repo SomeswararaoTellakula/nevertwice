@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NeverTwice · on-call memory</title>
+  <meta name="description" content="NeverTwice is an on-call incident copilot that remembers every incident, using Hindsight agent memory.">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="NeverTwice home">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#1f2b47"/><circle class="ring-back" cx="13" cy="16" r="7" fill="none" stroke="#f2a93b" stroke-width="2.5" opacity=".5"/><circle class="ring-front" cx="19" cy="16" r="7" fill="none" stroke="#f2a93b" stroke-width="2.5"/></svg>
+      <span class="brand-text"><span class="brand-name">NeverTwice</span><span class="brand-org">BasketBolt on-call</span></span>
+    </a>
+    <nav class="tabs" role="tablist" aria-label="Views">
+      <button class="tab" role="tab" data-view="triage" aria-selected="true">Triage</button>
+      <button class="tab" role="tab" data-view="ask" aria-selected="false">Ask memory</button>
+      <button class="tab" role="tab" data-view="memory" aria-selected="false">Runbooks &amp; memory</button>
+      <button class="tab" role="tab" data-view="learning" aria-selected="false">Learning</button>
+    </nav>
+    <div class="status" id="status">
+      <span class="pill"><span class="dot"></span>Connecting…</span>
+    </div>
+    <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle dark mode"><svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm0 1.5v10a5 5 0 0 1 0-10Z" fill="currentColor"/></svg></button>
+  </header>
+
+  <div class="band-art" aria-hidden="true">
+    <svg viewBox="0 0 600 260" preserveAspectRatio="xMaxYMin slice"><circle class="art-back" cx="400" cy="70" r="170" /><circle class="art-front" cx="500" cy="70" r="170" /></svg>
+  </div>
+
+  <div id="banner" class="banner hidden" role="status"></div>
+
+  <main>
+    <!-- ================= TRIAGE ================= -->
+    <section class="view active" id="view-triage" aria-label="Triage">
+      <div class="triage-layout">
+        <aside class="panel inbox" aria-label="Alerts">
+          <div class="inbox-head"><h2>Alerts</h2><span class="small muted" id="alert-count"></span></div>
+          <div id="alert-list"></div>
+          <button class="btn new-alert-btn" id="new-alert" type="button">Write your own alert</button>
+        </aside>
+        <div id="triage-main">
+          <div class="panel empty">
+            <h2>Pick an alert to triage</h2>
+            <p>NeverTwice recalls every past incident from Hindsight memory before it answers.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ASK ================= -->
+    <section class="view" id="view-ask" aria-label="Ask memory">
+      <div class="ask-wrap">
+        <div class="panel ask-box">
+          <h1>Ask the team's incident memory</h1>
+          <p class="muted">Answers come from Hindsight <code>reflect</code>: it reasons over living runbooks, consolidated observations and raw facts, following the bank's directives.</p>
+          <form class="ask-form" id="ask-form">
+            <input id="ask-input" name="q" autocomplete="off" placeholder="e.g. What keeps breaking checkout-api, and what actually fixes it?" aria-label="Question">
+            <button class="btn memory" type="submit" id="ask-btn">Ask</button>
+          </form>
+          <div class="suggestions" id="ask-suggestions"></div>
+        </div>
+        <div id="ask-answer"></div>
+      </div>
+    </section>
+
+    <!-- ================= MEMORY ================= -->
+    <section class="view" id="view-memory" aria-label="Runbooks and memory">
+      <div class="view-head">
+      <h1 class="page-title">Runbooks &amp; memory</h1>
+      <p class="view-intro">Everything NeverTwice knows lives in the Hindsight bank <code id="bank-id"></code>. Runbooks below are Hindsight mental models that re-write themselves after new incidents are consolidated.</p>
+      </div>
+      <div class="counts" id="counts"></div>
+      <div class="memory-grid" style="margin-top:18px">
+        <div id="models"></div>
+        <div>
+          <div class="panel browser">
+            <h2 class="section-title" style="margin-left:0">Directives (hard rules)</h2>
+            <div id="directives"></div>
+          </div>
+          <div class="panel browser" style="margin-top:16px">
+            <h2 class="section-title" style="margin-left:0">Browse facts</h2>
+            <form id="browse-form">
+              <input id="browse-q" placeholder="Search facts, e.g. HikariCP" aria-label="Search facts">
+              <select id="browse-type" aria-label="Fact type">
+                <option value="">All types</option>
+                <option value="world">World facts</option>
+                <option value="experience">Experience</option>
+                <option value="observation">Observations</option>
+              </select>
+              <button class="btn" type="submit">Search</button>
+            </form>
+            <div id="facts" style="margin-top:10px"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= LEARNING ================= -->
+    <section class="view" id="view-learning" aria-label="Learning">
+      <div class="view-head">
+      <h1 class="page-title">Is it getting better?</h1>
+      <p class="view-intro">Two measurements: a replay of the incident history (memory grows one incident at a time), and live feedback from responders when they resolve incidents here.</p>
+      </div>
+      <div class="panel chart-card" id="quality-card" style="margin-top:16px"></div>
+      <div class="learn-grid" style="margin-top:20px">
+        <div class="panel chart-card" id="eval-card"></div>
+        <div class="panel chart-card" id="feedback-card"></div>
+      </div>
+      <div class="panel chart-card" style="margin-top:20px">
+        <h2 class="section-title" style="margin-left:0">Triage log</h2>
+        <div id="triage-log"></div>
+      </div>
+    </section>
+  </main>
+
+  <div class="scrim" id="scrim" aria-hidden="true"></div>
+
+  <!-- incident drawer -->
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-label="Incident details">
+    <div class="drawer-inner" id="drawer-inner"></div>
+  </aside>
+
+  <!-- resolve dialog -->
+  <dialog id="resolve-dialog" aria-labelledby="resolve-title">
+    <form method="dialog" id="resolve-form">
+      <div class="dialog-body" id="resolve-body"></div>
+      <div class="dialog-foot" id="resolve-foot"></div>
+    </form>
+  </dialog>
+
+  <!-- custom alert dialog -->
+  <dialog id="alert-dialog" aria-labelledby="alert-dialog-title">
+    <form method="dialog" id="alert-form">
+      <div class="dialog-body">
+        <h2 id="alert-dialog-title">Write your own alert</h2>
+        <p class="muted small">Paste a real alert and log lines. NeverTwice will triage it against the team's memory.</p>
+        <div class="field"><label for="af-title">Alert title</label><input id="af-title" required minlength="3" placeholder="checkout-api 5xx rate 12%"></div>
+        <div class="row2">
+          <div class="field"><label for="af-service">Service</label><select id="af-service"></select></div>
+          <div class="field"><label for="af-sev">Severity</label><select id="af-sev"><option>SEV1</option><option selected>SEV2</option><option>SEV3</option></select></div>
+        </div>
+        <div class="field"><label for="af-metrics">Metrics <span class="hint">(optional)</span></label><input id="af-metrics" placeholder="p99 12s, error rate 9%"></div>
+        <div class="field"><label for="af-changes">Recent changes <span class="hint">(optional)</span></label><input id="af-changes" placeholder="Deployed v2.3.1 at 10:40"></div>
+        <div class="field"><label for="af-logs">Log lines</label><textarea id="af-logs" class="code" placeholder="Paste error lines here"></textarea></div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn primary" value="ok" id="af-submit">Add alert</button>
+        <button class="btn" value="cancel" formnovalidate>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

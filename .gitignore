@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+runtime/*
+!runtime/.gitkeep
+.DS_Store
+.idea/
+.vscode/

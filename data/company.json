@@ -1,0 +1,77 @@
+{
+  "company": {
+    "name": "BasketBolt",
+    "description": "10-minute grocery delivery (quick commerce) across Hyderabad, Bengaluru and Pune. ~180k orders/day, peaks at lunch (11:00-14:00 IST) and dinner (19:00-22:30 IST).",
+    "stack": "AWS ap-south-1 (Mumbai), EKS (Kubernetes 1.32), Argo CD, RDS PostgreSQL 16 (orders-db), ElastiCache Redis (dispatch-cache), MSK Kafka, OpenSearch 2.19, Flagship feature flags, Grafana + Prometheus, PagerDuty.",
+    "timezone": "Asia/Kolkata (IST, UTC+05:30)"
+  },
+  "services": [
+    {"name": "checkout-api", "team": "Checkout", "stack": "Java 21, Spring Boot 3.3, HikariCP, orders-db (PostgreSQL)", "owner": "Priya Raman", "slack": "#team-checkout"},
+    {"name": "payments-gateway", "team": "Payments", "stack": "Go 1.23, UPI via PSPs NovaPay (primary) and UPIxpress (secondary)", "owner": "Kavya Reddy", "slack": "#team-payments"},
+    {"name": "inventory-sync", "team": "Supply", "stack": "Python 3.12 workers, Kafka consumers on inventory.updates, inventory-reconcile CronJob", "owner": "Arjun Mehta", "slack": "#team-supply"},
+    {"name": "rider-dispatch", "team": "Logistics", "stack": "Go, gRPC, Redis GEO on dispatch-cache", "owner": "Sneha Kulkarni", "slack": "#team-logistics"},
+    {"name": "search-api", "team": "Discovery", "stack": "Kotlin, OpenSearch 2.19 (catalog index, bb_indic analyzer for Telugu/Hindi)", "owner": "Rohit Nair", "slack": "#team-discovery"},
+    {"name": "notification-svc", "team": "Growth", "stack": "Node.js 20, SMS (SMSKart), WhatsApp, FCM push", "owner": "Meera Iyer", "slack": "#team-growth"},
+    {"name": "platform", "team": "Platform/SRE", "stack": "EKS, CoreDNS + NodeLocal DNSCache, cert-manager, Terraform, RDS", "owner": "Farhan Siddiqui", "slack": "#team-platform"}
+  ],
+  "people": [
+    {"name": "Priya Raman", "role": "Staff engineer, Checkout (checkout-api owner)"},
+    {"name": "Kavya Reddy", "role": "Senior engineer, Payments (payments-gateway owner, NovaPay relationship)"},
+    {"name": "Arjun Mehta", "role": "SRE, owns inventory-sync on-call"},
+    {"name": "Sneha Kulkarni", "role": "Engineering lead, Logistics (rider-dispatch)"},
+    {"name": "Rohit Nair", "role": "Senior engineer, Discovery (search-api, OpenSearch)"},
+    {"name": "Meera Iyer", "role": "Engineer, Growth (notification-svc)"},
+    {"name": "Farhan Siddiqui", "role": "Platform lead (EKS, DNS, RDS, cert-manager)"},
+    {"name": "Nikhil Varma", "role": "SRE (joined July 2026)"},
+    {"name": "Vikram Rao", "role": "Engineering manager, incident commander rotation"}
+  ],
+  "conventions": [
+    {
+      "id": "CONV-01",
+      "title": "Never flush production Redis",
+      "text": "On-call rule: never run FLUSHALL or FLUSHDB on dispatch-cache or any production Redis. dispatch-cache holds live rider assignments and surge-pricing state; flushing it re-assigns every in-flight order. Use scripts/purge_stale_rider_keys.py for targeted cleanup. Established after INC-2199."
+    },
+    {
+      "id": "CONV-02",
+      "title": "RDS instance class changes need IC approval",
+      "text": "On-call rule: changing an RDS instance class (e.g. orders-db) during an incident triggers a Multi-AZ failover with 60-120 seconds of full database downtime. It requires explicit incident-commander approval. Established after INC-2282."
+    },
+    {
+      "id": "CONV-03",
+      "title": "orders-db connection budget",
+      "text": "On-call rule: orders-db has max_connections=500. checkout-api pods each use a HikariCP pool of up to 40 connections, so scaling checkout-api above 12 replicas can exhaust the database for every service. Do not scale checkout-api to fix pool exhaustion without checking the budget (see INC-2104)."
+    },
+    {
+      "id": "CONV-04",
+      "title": "PSP failover is pre-approved",
+      "text": "On-call rule: flipping the Flagship flag upi_psp_routing to 'upixpress:100' is pre-approved for any on-call engineer when NovaPay UPI success drops below 90%. Post in #psp-novapay-bridge and page Kavya Reddy. Do not run the payment-retry job while a PSP is degraded (see INC-2233)."
+    },
+    {
+      "id": "CONV-05",
+      "title": "Kafka poison records",
+      "text": "On-call rule: to unblock a Kafka partition stuck on a poison record, move the single offset to the DLQ with kafka-dlq-skip --topic <topic> --partition <p> --offset <o> --to-dlq. Never reset consumer group offsets to latest on inventory.updates; it silently loses stock updates."
+    },
+    {
+      "id": "CONV-06",
+      "title": "Escalation owners",
+      "text": "Escalation owners: checkout-api -> Priya Raman; payments-gateway -> Kavya Reddy; inventory-sync -> Arjun Mehta; rider-dispatch -> Sneha Kulkarni; search-api -> Rohit Nair; notification-svc -> Meera Iyer; platform, DNS, EKS and RDS -> Farhan Siddiqui. Incident commander rotation for September 2026: Vikram Rao."
+    },
+    {
+      "id": "CONV-07",
+      "title": "Rollbacks via Argo CD",
+      "text": "On-call rule: roll back an application with argocd app history <app> followed by argocd app rollback <app> <revision>. Rollbacks of the last deploy are pre-approved during an incident if the deploy happened within 6 hours of the alert."
+    }
+  ],
+  "changes": [
+    {"id": "CHG-0417", "at": "2026-04-17T18:30:00+05:30", "service": "inventory-sync", "summary": "inventory-sync v3.8.0 deployed: inventory-reconcile CronJob schedule changed from '0 3 * * *' to '30 5 * * *' (author assumed the cluster runs in IST; CronJobs run in UTC, so it now fires at 11:00 IST)."},
+    {"id": "CHG-0402", "at": "2026-04-02T16:10:00+05:30", "service": "platform", "summary": "Terraform IAM refactor (infra PR #1187) tightened the cert-manager IRSA role policy; route53:ChangeResourceRecordSets on the basketbolt.in hosted zone was removed by mistake."},
+    {"id": "CHG-0609", "at": "2026-06-09T15:05:00+05:30", "service": "rider-dispatch", "summary": "rider-dispatch v2.4.0 deployed: rider location writes moved to a GEOADD pipeline; the EXPIRE call for rider:loc:{rider_id} keys was dropped."},
+    {"id": "CHG-0627", "at": "2026-06-27T12:00:00+05:30", "service": "search-api", "summary": "search-api v7.2.0: 'filter chips' feature launched behind flag search_filter_chips at 50% traffic (terms aggregations on brand.keyword and attributes.*)."},
+    {"id": "CHG-0718", "at": "2026-07-18T17:20:00+05:30", "service": "notification-svc", "summary": "notification-svc v3.9.0: OTP SMS copy changed to include the app name and an emoji (template_version v8)."},
+    {"id": "CHG-0730", "at": "2026-07-30T23:00:00+05:30", "service": "inventory-sync", "summary": "Warehouse HYD-KONDAPUR-02 WMS firmware updated to 5.2 by the vendor (bundled-item SKU encoding changed)."},
+    {"id": "CHG-0809", "at": "2026-08-09T14:00:00+05:30", "service": "platform", "summary": "Platform CronJob clean-up: all CronJobs now declare timeZone: Asia/Kolkata. Several jobs were normalised to '0 0 * * *'."},
+    {"id": "CHG-0827", "at": "2026-08-27T11:00:00+05:30", "service": "platform", "summary": "EKS upgrade 1.31 -> 1.32 using a new node group ng-general-v4 (old node group ng-general-v3 drained)."},
+    {"id": "CHG-0902", "at": "2026-09-02T19:45:00+05:30", "service": "checkout-api", "summary": "checkout-api v5.12.0 deployed: datasource config moved into shared library bb-spring-starter 2.3."},
+    {"id": "CHG-0918", "at": "2026-09-18T22:00:00+05:30", "service": "payments-gateway", "summary": "Quarterly rotation of the UPIxpress webhook signing secret (Vault path secret/payments/upixpress/webhook, key id whsec_2026_09)."}
+  ]
+}

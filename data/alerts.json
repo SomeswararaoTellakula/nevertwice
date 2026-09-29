@@ -1,0 +1,90 @@
+[
+  {
+    "id": "ALT-501",
+    "title": "checkout-api 5xx rate 13.7% — HikariCP connection timeouts",
+    "service": "checkout-api",
+    "severity": "SEV1",
+    "fired_at": "2026-09-28T11:06:00+05:30",
+    "source": "Grafana alert 'checkout-api 5xx rate > 2%' (PagerDuty)",
+    "metrics": "5xx rate 13.7% (threshold 2%), p99 latency 29.8s, HikariCP active 40/40, waiting 231, orders/min down 34%",
+    "logs": "2026-09-28T11:05:41.207+05:30 WARN  [http-nio-8080-exec-54] c.z.h.p.HikariPool : HikariPool-1 - Connection is not available, request timed out after 30000ms (total=40, active=40, idle=0, waiting=231)\n2026-09-28T11:05:41.215+05:30 ERROR [http-nio-8080-exec-54] c.b.checkout.api.StockReservationService : reserve failed sku=HYD03-118220 lock wait on stock_levels (waited 29870ms)\n2026-09-28T11:05:41.233+05:30 ERROR [http-nio-8080-exec-54] c.b.checkout.api.OrderController : POST /v2/checkout failed traceId=c81e2f07a9d3 status=503 cause=CannotCreateTransactionException",
+    "recent_changes": "inventory-sync v3.12.0 deployed today at 10:41 IST: reconcile workers 4 -> 12 (per-warehouse parallelism for new warehouse HYD-GACHIBOWLI-03); database connections consolidated onto the shared role inventory_svc.",
+    "demo_note": "Recurring failure mode. Memory should recall INC-2104 / INC-2291, warn that restarts and scaling backfired, and notice the new DB role bypasses the 60s idle-in-transaction timeout set on inventory_reconcile."
+  },
+  {
+    "id": "ALT-502",
+    "title": "payments-gateway UPI success rate 69% — NovaPay collect timeouts",
+    "service": "payments-gateway",
+    "severity": "SEV1",
+    "fired_at": "2026-09-28T20:12:00+05:30",
+    "source": "Grafana alert 'UPI success rate < 90%'",
+    "metrics": "UPI success rate 69% (SLO 95%), NovaPay collect p99 10.0s, UPIxpress p99 1.4s, NovaPay breaker flapping CLOSED/HALF_OPEN",
+    "logs": "2026-09-28T20:11:52.904+05:30 level=warn msg=\"psp call timeout\" psp=novapay op=collect_request vpa_handle=@ybl latency_ms=10001 txn_id=BB26092820110391\n2026-09-28T20:11:53.117+05:30 level=info msg=\"breaker state\" psp=novapay state=HALF_OPEN failure_ratio=0.22 window=60s threshold=0.25\n2026-09-28T20:11:53.402+05:30 level=error msg=\"payment failed\" reason=PSP_TIMEOUT psp=novapay order_id=ORD-99410022 attempt=1",
+    "recent_changes": "None in the last 24 hours.",
+    "demo_note": "Recurring vendor degradation. Memory should recommend the pre-approved upi_psp_routing flip and warn against raising timeouts or running payment-retry."
+  },
+  {
+    "id": "ALT-503",
+    "title": "inventory-sync consumer lag 840k on inventory.updates — consumers crash-looping",
+    "service": "inventory-sync",
+    "severity": "SEV2",
+    "fired_at": "2026-09-28T07:52:00+05:30",
+    "source": "Kafka consumer lag alert (> 200k)",
+    "metrics": "Consumer lag 840k on partition 1, 3 of 6 consumer pods in CrashLoopBackOff, stale-stock SKUs 9%",
+    "logs": "2026-09-28T07:51:18.442+05:30 inventory-sync-consumer-4 FATAL Fatal Python error: Segmentation fault (in google.protobuf.pyext decoding topic=inventory.updates partition=1 offset=93388120 warehouse=HYD-GACHIBOWLI-03)\n2026-09-28T07:51:19.010+05:30 kubelet Back-off restarting failed container consumer in pod inventory-sync-consumer-4",
+    "recent_changes": "Warehouse HYD-GACHIBOWLI-03 went live on 2026-09-24 using the same WMS vendor as HYD-KONDAPUR-02.",
+    "demo_note": "Recurring poison-record pattern (INC-2178, INC-2266). Memory should say: kafka-dlq-skip the offset, don't scale consumers or restart pods."
+  },
+  {
+    "id": "ALT-504",
+    "title": "DNS lookup timeouts on new node group ng-general-v5",
+    "service": "platform",
+    "severity": "SEV2",
+    "fired_at": "2026-09-28T15:31:00+05:30",
+    "source": "Multiple 5xx alerts (checkout-api, search-api, notification-svc)",
+    "metrics": "3-5% 5xx across services; affected pods all on ng-general-v5 nodes; CoreDNS CPU 22%",
+    "logs": "2026-09-28T15:30:44.610+05:30 notification-svc: Error: getaddrinfo EAI_AGAIN api.smskart.in\n2026-09-28T15:30:47.118+05:30 checkout-api: dial tcp: lookup orders-db.internal.basketbolt.in on 169.254.20.10:53: read udp 10.4.51.12:40221->169.254.20.10:53: i/o timeout",
+    "recent_changes": "Karpenter NodePool migration today at 14:50 IST: workloads moving to node group ng-general-v5 (Bottlerocket AMI).",
+    "demo_note": "Looks like INC-2160 (scale CoreDNS) but is really INC-2305 (node-local-dns not scheduled on new nodes). Memory should warn that scaling CoreDNS didn't help last time."
+  },
+  {
+    "id": "ALT-505",
+    "title": "search-api zero-result rate 34% for Telugu and Hindi queries",
+    "service": "search-api",
+    "severity": "SEV2",
+    "fired_at": "2026-09-23T13:18:00+05:30",
+    "source": "Alert 'search zero-result rate > 10%'",
+    "metrics": "Zero-result rate 34% (baseline 4%) only for queries using the bb_indic analyzer (Telugu/Hindi, e.g. 'ullipayalu', 'pyaaz'); English queries fine; 3 of 9 data nodes report shard failures",
+    "logs": "2026-09-23T13:17:52.301+05:30 search-api WARN partial search failure index=catalog_v31 shards_failed=4/12 node=os-data-v12-3 reason=[illegal_argument_exception] Unknown tokenizer type [icu_tokenizer] for [bb_indic_tokenizer]\n2026-09-23T13:17:52.305+05:30 search-api WARN query='ullipayalu' locale=te-IN hits=0 took_ms=41",
+    "recent_changes": "OpenSearch data node group rebuilt yesterday with new AMI opensearch-2.19-bb-v12 (Packer template refactor).",
+    "learning_demo": {"step": 1, "label": "Learning demo · step 1 (never seen before)"},
+    "suggested_resolution": {
+      "title": "Telugu/Hindi search returning zero results: analysis-icu plugin missing on new OpenSearch nodes",
+      "root_cause": "The Packer template refactor for AMI opensearch-2.19-bb-v12 dropped the step that installs the analysis-icu and analysis-phonetic plugins. Shards allocated to the three new os-data-v12 nodes could not build the bb_indic analyzer (icu_tokenizer), so Telugu and Hindi queries hit shard failures and returned zero results.",
+      "worked": [
+        "Excluded the new nodes from shard allocation so shards moved back to healthy nodes: PUT _cluster/settings {\"transient\":{\"cluster.routing.allocation.exclude._name\":\"os-data-v12-*\"}}",
+        "Rebuilt the AMI with analysis-icu and analysis-phonetic installed (bin/opensearch-plugin install analysis-icu analysis-phonetic) and added a Packer test that asserts both plugins are present"
+      ],
+      "failed": [
+        "Rolling restart of the os-data-v12 nodes: plugins are baked into the AMI, so restarts changed nothing"
+      ],
+      "made_worse": [],
+      "notes": "Zero-result rate back to 4% about 9 minutes after the allocation exclude. Check GET _cat/plugins on any new node group before letting it take shards.",
+      "responder": "Rohit Nair"
+    },
+    "demo_note": "Brand-new failure mode: the agent has no memory of it. Resolve it with 'Resolve & teach' to store the fix in Hindsight, then triage ALT-506."
+  },
+  {
+    "id": "ALT-506",
+    "title": "search-api partial shard failures on catalog_v32 — Hindi 'pyaaz' returns nothing",
+    "service": "search-api",
+    "severity": "SEV2",
+    "fired_at": "2026-09-28T12:44:00+05:30",
+    "source": "Alert 'search zero-result rate > 10%'",
+    "metrics": "Zero-result rate 27% for hi-IN and te-IN locales; shard failures only on node os-data-v13-1 (added by autoscaling 20 minutes ago)",
+    "logs": "2026-09-28T12:43:37.114+05:30 search-api WARN partial search failure index=catalog_v32 shards_failed=2/12 node=os-data-v13-1 reason=[illegal_argument_exception] Unknown tokenizer type [icu_tokenizer] for [bb_indic_tokenizer]\n2026-09-28T12:43:37.120+05:30 search-api WARN query='pyaaz' locale=hi-IN hits=0 took_ms=38",
+    "recent_changes": "OpenSearch domain autoscaling added node os-data-v13-1 from launch template v13 at 12:24 IST.",
+    "learning_demo": {"step": 2, "label": "Learning demo · step 2 (after you teach it)"},
+    "demo_note": "Same failure mode as ALT-505 on a new node. After ALT-505 is resolved, memory should recall the fix: exclude the node from allocation, check _cat/plugins, don't just restart."
+  }
+]

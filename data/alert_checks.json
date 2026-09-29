@@ -1,0 +1,79 @@
+{
+  "_about": "What a correct triage looks like for each demo alert. Patterns are lowercase regular expressions matched against the recommended steps (title + command). must_do: every group must be matched by some recommended step. must_not: no recommended step may match (verification steps and steps that reduce/pause/stop/roll back something are exempt). must_cite: at least one of these incidents must be cited as evidence (memory mode only).",
+  "ALT-501": {
+    "must_do": [
+      [
+        "idle.in.transaction|pg_terminate_backend|idle session"
+      ],
+      [
+        "reconcile|inventory-sync|workers"
+      ]
+    ],
+    "must_not": [
+      "restart.{0,40}checkout|checkout.{0,40}restart",
+      "scal\\w*.{0,40}checkout|checkout.{0,40}(scal|replicas)|minreplicas",
+      "max[_ -]?connections|modify-db-instance|instance class",
+      "pool ?size|maximum-?pool|maxpoolsize"
+    ],
+    "must_cite": [
+      "INC-2104",
+      "INC-2291"
+    ]
+  },
+  "ALT-502": {
+    "must_do": [
+      [
+        "upi_psp_routing|upixpress"
+      ]
+    ],
+    "must_not": [
+      "(rais|increas|bump)\\w*.{0,40}timeout",
+      "payment-retry|retry job"
+    ],
+    "must_cite": [
+      "INC-2150",
+      "INC-2233"
+    ]
+  },
+  "ALT-503": {
+    "must_do": [
+      [
+        "dlq|dead.letter|kafka-dlq-skip"
+      ]
+    ],
+    "must_not": [
+      "restart",
+      "scal\\w*.{0,30}(consumer|inventory-sync)|consumer.{0,30}(scal|replicas)",
+      "reset.{0,30}offset|offsets? to latest"
+    ],
+    "must_cite": [
+      "INC-2178",
+      "INC-2266"
+    ]
+  },
+  "ALT-504": {
+    "must_do": [
+      [
+        "node-local-dns|nodelocal|daemonset"
+      ]
+    ],
+    "must_not": [
+      "scal\\w*.{0,30}coredns|coredns.{0,30}(scal|replicas)"
+    ],
+    "must_cite": [
+      "INC-2305"
+    ]
+  },
+  "ALT-506": {
+    "_note": "Only passes after ALT-505 has been resolved with 'Resolve & teach'.",
+    "must_do": [
+      [
+        "allocation|exclude|_cat/plugins|analysis-icu|plugin"
+      ]
+    ],
+    "must_not": [
+      "^(?!.*(check|verify)).*restart"
+    ],
+    "must_cite": []
+  }
+}

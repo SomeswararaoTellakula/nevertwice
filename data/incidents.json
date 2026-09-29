@@ -1,0 +1,508 @@
+[
+  {
+    "id": "INC-2104",
+    "title": "Checkout failing with 5xx during lunch peak (HikariCP pool exhausted)",
+    "service": "checkout-api",
+    "severity": "SEV1",
+    "started_at": "2026-04-18T11:04:00+05:30",
+    "resolved_at": "2026-04-18T12:38:00+05:30",
+    "responder": "Priya Raman",
+    "incident_commander": "Vikram Rao",
+    "detected_by": "Grafana alert 'checkout-api 5xx rate > 2%'",
+    "impact": "11.4% of checkout requests failed for 94 minutes during lunch peak; about 6,800 orders abandoned (estimated Rs 31 lakh GMV).",
+    "symptoms": ["checkout-api 5xx rate 11.4%", "p99 latency 30.2s", "HikariCP active=40/40, waiting=212"],
+    "logs": "2026-04-18T11:03:52.118+05:30 WARN  [http-nio-8080-exec-87] c.z.h.p.HikariPool : HikariPool-1 - Connection is not available, request timed out after 30000ms (total=40, active=40, idle=0, waiting=212)\n2026-04-18T11:03:52.121+05:30 ERROR [http-nio-8080-exec-87] o.h.e.j.s.SqlExceptionHelper : HikariPool-1 - Connection is not available, request timed out after 30000ms.\n2026-04-18T11:03:52.140+05:30 ERROR [http-nio-8080-exec-87] c.b.checkout.api.OrderController : POST /v2/checkout failed traceId=7f3a9c2e1b44 status=503 cause=CannotCreateTransactionException",
+    "timeline": [
+      {"at": "11:04", "event": "PagerDuty page for checkout-api 5xx > 2%"},
+      {"at": "11:09", "event": "Priya Raman acknowledges"},
+      {"at": "11:15", "event": "Rolling restart of checkout-api"},
+      {"at": "11:19", "event": "Errors return after about 4 minutes"},
+      {"at": "11:24", "event": "HPA minReplicas raised 12 -> 20"},
+      {"at": "11:27", "event": "orders-db rejects connections: FATAL sorry, too many clients already; payments-gateway and rider-dispatch also fail"},
+      {"at": "11:31", "event": "Scaled back to 12 replicas"},
+      {"at": "11:48", "event": "Arjun Mehta finds 38 'idle in transaction' sessions from application_name=inventory-reconcile holding row locks on stock_levels"},
+      {"at": "12:02", "event": "inventory-reconcile CronJob suspended; idle-in-transaction sessions terminated"},
+      {"at": "12:05", "event": "HikariCP pool recovers, 5xx back under 0.3%"},
+      {"at": "12:38", "event": "Resolved"}
+    ],
+    "root_cause": "inventory-sync v3.8.0 changed the inventory-reconcile CronJob schedule to '30 5 * * *' assuming IST, but Kubernetes CronJobs run in UTC, so the job ran at 11:00 IST (lunch peak). The job opens one transaction per warehouse, locks stock_levels rows with SELECT ... FOR UPDATE and then calls the slow WMS API (~40s per warehouse), leaving sessions 'idle in transaction'. checkout-api's stock reservation UPDATE blocks on those locks, every HikariCP connection ends up waiting, and the pool is exhausted.",
+    "contributing_factors": ["No idle_in_transaction_session_timeout on the reconcile role", "No alert on idle-in-transaction session count", "CronJob spec had no timeZone field"],
+    "remediations": [
+      {"action": "Rolling restart of checkout-api", "command": "kubectl rollout restart deploy/checkout-api -n checkout", "outcome": "failed", "result": "Errors dropped for about 4 minutes, then the pool was exhausted again because the blocking row locks were still held by inventory-reconcile.", "at": "11:15"},
+      {"action": "Scaled checkout-api HPA minReplicas from 12 to 20", "command": "kubectl patch hpa checkout-api -n checkout -p '{\"spec\":{\"minReplicas\":20}}'", "outcome": "made_worse", "result": "20 pods x 40 connections exceeded orders-db max_connections=500; orders-db returned 'FATAL: sorry, too many clients already' and payments-gateway and rider-dispatch lost database access for 4 minutes.", "at": "11:24"},
+      {"action": "Suspended the inventory-reconcile CronJob and terminated idle-in-transaction sessions older than 60 seconds", "command": "kubectl patch cronjob inventory-reconcile -n inventory -p '{\"spec\":{\"suspend\":true}}' && psql -h orders-db -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND application_name = 'inventory-reconcile' AND now() - state_change > interval '60 seconds';\"", "outcome": "worked", "result": "Row locks released and the HikariCP pool recovered within 3 minutes.", "at": "12:02"}
+    ],
+    "action_items": [
+      {"item": "Set idle_in_transaction_session_timeout = '60s' for the inventory_reconcile database role", "status": "open"},
+      {"item": "Add timeZone: Asia/Kolkata to CronJob specs and move reconcile back to 03:00 IST", "status": "done"},
+      {"item": "Alert when pg_stat_activity shows more than 10 idle-in-transaction sessions", "status": "open"}
+    ],
+    "related_change": "CHG-0417",
+    "fix_keywords": ["inventory-reconcile", "idle in transaction", "pg_terminate_backend"]
+  },
+  {
+    "id": "INC-2125",
+    "title": "Partner API TLS certificate expired on partners.basketbolt.in",
+    "service": "platform",
+    "severity": "SEV2",
+    "started_at": "2026-04-29T09:12:00+05:30",
+    "resolved_at": "2026-04-29T10:20:00+05:30",
+    "responder": "Farhan Siddiqui",
+    "detected_by": "Brand partner (FMCG distributor) email: inventory push API failing",
+    "impact": "Partner inventory pushes failed for 68 minutes; 14 brand partners affected, no customer-facing impact.",
+    "symptoms": ["x509: certificate has expired or is not yet valid", "cert-manager Certificate partners-basketbolt-in not Ready for 30 days"],
+    "logs": "2026-04-29T09:10:44+05:30 partner-ingest: Post \"https://partners.basketbolt.in/v1/inventory\": x509: certificate has expired or is not yet valid: current time 2026-04-29T03:40:44Z is after 2026-04-29T00:00:00Z\ncert-manager E0429 03:41:02 controller.go:167] \"re-queuing item due to error processing\" err=\"failed to change Route 53 record set: AccessDenied: User: arn:aws:sts::482193550871:assumed-role/cert-manager-irsa/cert-manager is not authorized to perform: route53:ChangeResourceRecordSets on resource: arn:aws:route53:::hostedzone/Z07412963KXQ8T2M1VQ4\"",
+    "timeline": [
+      {"at": "09:12", "event": "Partner reports failures"},
+      {"at": "09:25", "event": "Restarted cert-manager pods, no change"},
+      {"at": "09:48", "event": "Found Route 53 AccessDenied in cert-manager logs, traced to infra PR #1187"},
+      {"at": "10:05", "event": "Reverted IAM policy with terraform apply"},
+      {"at": "10:12", "event": "Forced renewal, new certificate issued"},
+      {"at": "10:20", "event": "Resolved"}
+    ],
+    "root_cause": "The Terraform IAM refactor in infra PR #1187 removed route53:ChangeResourceRecordSets from the cert-manager IRSA role. DNS-01 renewals failed silently for 30 days until the certificate expired. There was no alert on certificate expiry.",
+    "contributing_factors": ["No certificate expiry alert", "IAM change was not tested against cert-manager"],
+    "remediations": [
+      {"action": "Restarted cert-manager pods", "command": "kubectl rollout restart deploy/cert-manager -n cert-manager", "outcome": "failed", "result": "No effect; the failure was an IAM permission problem, not a stuck controller.", "at": "09:25"},
+      {"action": "Restored the Route 53 permission for the cert-manager IRSA role and forced certificate renewal", "command": "terraform apply -target=aws_iam_role_policy.cert_manager && cmctl renew partners-basketbolt-in -n edge", "outcome": "worked", "result": "New certificate issued 4 minutes after renewal.", "at": "10:05"}
+    ],
+    "action_items": [
+      {"item": "Prometheus alert when certmanager_certificate_expiration_timestamp_seconds - time() < 14 days", "status": "done"},
+      {"item": "Policy test for cert-manager IAM role in CI", "status": "open"}
+    ],
+    "related_change": "CHG-0402",
+    "fix_keywords": ["route53", "iam", "cmctl renew"]
+  },
+  {
+    "id": "INC-2150",
+    "title": "UPI payment success rate dropped to 71% (NovaPay collect timeouts)",
+    "service": "payments-gateway",
+    "severity": "SEV1",
+    "started_at": "2026-05-09T19:40:00+05:30",
+    "resolved_at": "2026-05-09T22:10:00+05:30",
+    "responder": "Kavya Reddy",
+    "incident_commander": "Vikram Rao",
+    "detected_by": "Grafana alert 'UPI success rate < 90%'",
+    "impact": "UPI success rate fell from 97% to 71% (55% at worst) during dinner peak for 38 minutes; about 4,100 failed payment attempts.",
+    "symptoms": ["UPI success rate 71%", "NovaPay collect_request latency p99 10.0s (timeout)", "payments-gateway goroutines climbing"],
+    "logs": "2026-05-09T19:41:07.552+05:30 level=warn msg=\"psp call timeout\" psp=novapay op=collect_request vpa_handle=@okaxis latency_ms=10002 txn_id=BB26050919410872\n2026-05-09T19:41:07.553+05:30 level=error msg=\"payment failed\" reason=PSP_TIMEOUT psp=novapay order_id=ORD-88120451 attempt=1",
+    "timeline": [
+      {"at": "19:40", "event": "UPI success rate alert"},
+      {"at": "19:52", "event": "NovaPay client timeout raised from 10s to 30s (psp.novapay.timeout_ms)"},
+      {"at": "20:05", "event": "payments-gateway pods OOMKilled: 48k goroutines, RSS 3.1GiB against a 2GiB limit; success rate 55%"},
+      {"at": "20:09", "event": "Timeout reverted to 10s"},
+      {"at": "20:14", "event": "Flagship flag upi_psp_routing changed from novapay:80,upixpress:20 to upixpress:100"},
+      {"at": "20:18", "event": "UPI success rate back to 96%"},
+      {"at": "21:30", "event": "NovaPay confirms degradation at their sponsor bank's UPI switch"},
+      {"at": "22:10", "event": "Routing restored to novapay:80,upixpress:20; resolved"}
+    ],
+    "root_cause": "NovaPay, the primary UPI payment service provider, was degraded because of a problem at its sponsor bank's UPI switch. payments-gateway had no automatic PSP failover.",
+    "contributing_factors": ["No circuit breaker between payments-gateway and NovaPay", "Timeouts held goroutines and memory"],
+    "remediations": [
+      {"action": "Raised the NovaPay client timeout from 10s to 30s", "command": "flagship set psp.novapay.timeout_ms 30000", "outcome": "made_worse", "result": "Requests piled up (48k goroutines), payments-gateway pods were OOMKilled and success rate dropped to 55%.", "at": "19:52"},
+      {"action": "Routed 100% of UPI traffic to the secondary PSP UPIxpress", "command": "flagship set upi_psp_routing 'upixpress:100'", "outcome": "worked", "result": "UPI success rate recovered to 96% within 4 minutes.", "at": "20:14"}
+    ],
+    "action_items": [
+      {"item": "Circuit breaker with automatic PSP failover (PAY-431)", "status": "done"},
+      {"item": "Join NovaPay status webhook into #psp-novapay-bridge", "status": "done"}
+    ],
+    "related_change": null,
+    "fix_keywords": ["upi_psp_routing", "upixpress"]
+  },
+  {
+    "id": "INC-2160",
+    "title": "Intermittent 5xx across services: DNS lookup timeouts (CoreDNS saturated)",
+    "service": "platform",
+    "severity": "SEV2",
+    "started_at": "2026-05-21T14:22:00+05:30",
+    "resolved_at": "2026-05-21T15:31:00+05:30",
+    "responder": "Farhan Siddiqui",
+    "detected_by": "Multiple service 5xx alerts within 3 minutes",
+    "impact": "1-4% intermittent 5xx on checkout-api, search-api and notification-svc for 69 minutes during a marketing campaign (3x traffic).",
+    "symptoms": ["i/o timeout on DNS lookups", "CoreDNS pods CPU throttled at 200m limit", "Errors spread across unrelated services"],
+    "logs": "2026-05-21T14:21:58.311+05:30 checkout-api: dial tcp: lookup orders-db.internal.basketbolt.in on 172.20.0.10:53: read udp 10.4.12.9:51544->172.20.0.10:53: i/o timeout\n2026-05-21T14:22:03.902+05:30 coredns-7d8f9c6b5-k2x9q [ERROR] plugin/errors: 2 api.upixpress.in.checkout.svc.cluster.local. A: read udp 10.4.3.21:40211->10.0.0.2:53: i/o timeout",
+    "timeline": [
+      {"at": "14:22", "event": "5xx alerts on three services"},
+      {"at": "14:35", "event": "Restarted checkout-api and search-api pods, no improvement"},
+      {"at": "14:50", "event": "CoreDNS found CPU-throttled; ndots:5 causing 5 lookups per external hostname"},
+      {"at": "14:58", "event": "CoreDNS scaled 2 -> 6 replicas and CPU limit raised to 1 core"},
+      {"at": "15:06", "event": "Error rate normal"},
+      {"at": "15:31", "event": "Resolved"}
+    ],
+    "root_cause": "Campaign traffic tripled DNS query volume. With the default ndots:5 each external hostname produced up to five search-domain lookups, and only two CoreDNS replicas with a 200m CPU limit served the cluster, so CoreDNS was throttled and queries timed out.",
+    "contributing_factors": ["No NodeLocal DNSCache", "Default ndots:5 on high-QPS services"],
+    "remediations": [
+      {"action": "Restarted affected application pods", "command": "kubectl rollout restart deploy/checkout-api -n checkout", "outcome": "failed", "result": "No improvement; the bottleneck was CoreDNS, not the applications.", "at": "14:35"},
+      {"action": "Scaled CoreDNS from 2 to 6 replicas and raised its CPU limit", "command": "kubectl scale deploy/coredns -n kube-system --replicas=6", "outcome": "worked", "result": "DNS timeouts stopped within 8 minutes.", "at": "14:58"}
+    ],
+    "action_items": [
+      {"item": "Deploy NodeLocal DNSCache DaemonSet (node-local-dns)", "status": "done"},
+      {"item": "Set dnsConfig ndots:2 on high-QPS services", "status": "done"}
+    ],
+    "related_change": null,
+    "fix_keywords": ["coredns", "scale", "nodelocal"]
+  },
+  {
+    "id": "INC-2178",
+    "title": "Out-of-stock items shown as available: Kafka consumer lag 1.2M on inventory.updates",
+    "service": "inventory-sync",
+    "severity": "SEV2",
+    "started_at": "2026-06-02T08:15:00+05:30",
+    "resolved_at": "2026-06-02T10:02:00+05:30",
+    "responder": "Arjun Mehta",
+    "detected_by": "Kafka consumer lag alert (> 200k) and rising order-cancellation rate",
+    "impact": "12% of catalog showed stale stock for 107 minutes; order cancellations due to out-of-stock rose to 8%.",
+    "symptoms": ["Consumer lag 1.2M on inventory.updates partition 3", "Same offset retried thousands of times"],
+    "logs": "2026-06-02T08:14:41.006+05:30 inventory-sync-consumer-5 ERROR Failed to process record topic=inventory.updates partition=3 offset=88412190: ValidationError: sku_id 'KND02-000000' does not match pattern ^[A-Z]{3}\\d{2}-\\d{6}$ (retry 1874)",
+    "timeline": [
+      {"at": "08:15", "event": "Lag alert"},
+      {"at": "08:32", "event": "Consumers scaled 6 -> 12, no effect"},
+      {"at": "09:10", "event": "Poison record identified: malformed SKU from new warehouse HYD-KONDAPUR-02 WMS integration"},
+      {"at": "09:38", "event": "Offset moved to DLQ with kafka-dlq-skip; validator patched"},
+      {"at": "10:00", "event": "Lag drained"},
+      {"at": "10:02", "event": "Resolved"}
+    ],
+    "root_cause": "The new warehouse HYD-KONDAPUR-02 went live with a WMS integration that emitted malformed SKU ids for bundled items. The consumer retried the poison record forever (no dead-letter queue), blocking partition 3 of inventory.updates.",
+    "contributing_factors": ["No automatic DLQ after N retries", "No schema contract test for new warehouse integrations"],
+    "remediations": [
+      {"action": "Scaled inventory-sync consumers from 6 to 12", "command": "kubectl scale deploy/inventory-sync-consumer -n inventory --replicas=12", "outcome": "failed", "result": "No effect: the topic has 6 partitions so the extra consumers sat idle, and the blocked partition stayed blocked.", "at": "08:32"},
+      {"action": "Moved the poison offset to the dead-letter queue and patched the SKU validator", "command": "kafka-dlq-skip --topic inventory.updates --partition 3 --offset 88412190 --to-dlq", "outcome": "worked", "result": "Partition 3 resumed; 1.2M lag drained in 22 minutes.", "at": "09:38"}
+    ],
+    "action_items": [
+      {"item": "Automatic DLQ after 3 retries in inventory-sync (v3.11.0)", "status": "done"},
+      {"item": "SKU schema contract test in the warehouse onboarding checklist", "status": "done"}
+    ],
+    "related_change": null,
+    "fix_keywords": ["kafka-dlq-skip", "dlq", "poison"]
+  },
+  {
+    "id": "INC-2199",
+    "title": "Rider assignment stalled: Redis OOM on dispatch-cache during cricket final",
+    "service": "rider-dispatch",
+    "severity": "SEV1",
+    "started_at": "2026-06-21T21:48:00+05:30",
+    "resolved_at": "2026-06-21T22:41:00+05:30",
+    "responder": "Sneha Kulkarni",
+    "incident_commander": "Vikram Rao",
+    "detected_by": "Alert 'order-to-rider assignment p95 > 90s'",
+    "impact": "Rider assignment stalled for 53 minutes during the cricket final demand spike; 2,900 orders delayed beyond the 10-minute promise.",
+    "symptoms": ["Redis OOM errors", "dispatch-cache used_memory 12.9G of 13G maxmemory", "evicted_keys 0 (noeviction policy)"],
+    "logs": "2026-06-21T21:47:55.431+05:30 rider-dispatch level=error msg=\"assign_rider failed\" order_id=ORD-90233871 err=\"OOM command not allowed when used memory > 'maxmemory'.\"\n2026-06-21T21:48:02.117+05:30 dispatch-cache INFO memory: used_memory_human:12.90G maxmemory_human:13.00G maxmemory_policy:noeviction",
+    "timeline": [
+      {"at": "21:48", "event": "Assignment latency alert"},
+      {"at": "21:58", "event": "FLUSHALL proposed; rejected by incident commander because it would wipe live assignments"},
+      {"at": "22:03", "event": "maxmemory-policy switched to allkeys-lru"},
+      {"at": "22:07", "event": "Active assignment keys evicted: 180 riders received duplicate orders; policy reverted"},
+      {"at": "22:15", "event": "Found 4.1M rider:loc keys without TTL since v2.4.0"},
+      {"at": "22:26", "event": "Ran purge_stale_rider_keys.py, freed 7.8GB"},
+      {"at": "22:41", "event": "Hotfix v2.4.1 restores 15-minute TTL; resolved"}
+    ],
+    "root_cause": "rider-dispatch v2.4.0 moved rider location writes to a GEOADD pipeline and dropped the EXPIRE on rider:loc:{rider_id} keys. Stale locations accumulated for 12 days until the cricket final demand spike filled the remaining memory.",
+    "contributing_factors": ["No alert on dispatch-cache memory > 80%", "No TTL assertion in tests"],
+    "remediations": [
+      {"action": "Switched dispatch-cache maxmemory-policy to allkeys-lru", "command": "redis-cli -h dispatch-cache CONFIG SET maxmemory-policy allkeys-lru", "outcome": "made_worse", "result": "Redis evicted active assignment keys; 180 riders received duplicate orders. Reverted after 4 minutes.", "at": "22:03"},
+      {"action": "Purged stale rider location keys and shipped hotfix v2.4.1 restoring the 15-minute TTL", "command": "python scripts/purge_stale_rider_keys.py --older-than 30m", "outcome": "worked", "result": "Freed 7.8GB; assignment latency normal within 6 minutes.", "at": "22:26"}
+    ],
+    "action_items": [
+      {"item": "Alert when dispatch-cache used_memory > 80% of maxmemory", "status": "done"},
+      {"item": "Unit test asserting TTL on rider:loc keys", "status": "done"}
+    ],
+    "related_change": "CHG-0609",
+    "fix_keywords": ["purge_stale_rider_keys", "ttl", "rider:loc"]
+  },
+  {
+    "id": "INC-2210",
+    "title": "Search latency p99 9s: OpenSearch parent circuit breaker tripping",
+    "service": "search-api",
+    "severity": "SEV2",
+    "started_at": "2026-06-28T13:05:00+05:30",
+    "resolved_at": "2026-06-28T14:12:00+05:30",
+    "responder": "Rohit Nair",
+    "detected_by": "Alert 'search-api p99 > 2s'",
+    "impact": "Search p99 latency 9s and 6% failed searches for 67 minutes during lunch; search-to-cart conversion down 18%.",
+    "symptoms": ["circuit_breaking_exception [parent] Data too large", "Heap usage 96% on data nodes"],
+    "logs": "2026-06-28T13:04:51.822+05:30 search-api ERROR OpenSearchStatusException[OpenSearch exception [type=circuit_breaking_exception, reason=[parent] Data too large, data for [<http_request>] would be [7.8gb/7.8gb], which is larger than the limit of [7.6gb/7.6gb], real usage: [7.8gb/7.8gb]]]",
+    "timeline": [
+      {"at": "13:05", "event": "Latency alert"},
+      {"at": "13:18", "event": "Rolling restart of OpenSearch data nodes started"},
+      {"at": "13:26", "event": "Shard relocation storm; cluster red for 6 minutes"},
+      {"at": "13:41", "event": "Correlated with search_filter_chips rollout (terms aggregations on brand.keyword)"},
+      {"at": "13:44", "event": "Flag search_filter_chips disabled and fielddata cache cleared"},
+      {"at": "13:52", "event": "Heap back to 61%, latency normal"},
+      {"at": "14:12", "event": "Resolved"}
+    ],
+    "root_cause": "The filter chips feature (flag search_filter_chips, search-api v7.2.0) ran terms aggregations on brand.keyword and attributes.* for every query, loading large fielddata into heap and tripping the parent circuit breaker.",
+    "contributing_factors": ["Feature launched at 50% traffic without load test", "No heap alert"],
+    "remediations": [
+      {"action": "Rolling restart of OpenSearch data nodes", "command": "aws opensearch ... (node-by-node restart)", "outcome": "made_worse", "result": "Triggered a shard relocation storm; cluster went red for 6 minutes.", "at": "13:18"},
+      {"action": "Disabled the search_filter_chips flag and cleared the fielddata cache", "command": "flagship set search_filter_chips off && curl -XPOST 'https://search-os:9200/_cache/clear?fielddata=true'", "outcome": "worked", "result": "Heap dropped from 96% to 61%; latency normal in 8 minutes.", "at": "13:44"}
+    ],
+    "action_items": [
+      {"item": "Re-implement filter chips with pre-computed facets", "status": "done"},
+      {"item": "Load test gate for features adding aggregations", "status": "open"}
+    ],
+    "related_change": "CHG-0627",
+    "fix_keywords": ["search_filter_chips", "fielddata", "_cache/clear"]
+  },
+  {
+    "id": "INC-2233",
+    "title": "UPI failures again: NovaPay degradation, circuit breaker too slow to trip",
+    "service": "payments-gateway",
+    "severity": "SEV1",
+    "started_at": "2026-07-12T20:31:00+05:30",
+    "resolved_at": "2026-07-12T21:20:00+05:30",
+    "responder": "Kavya Reddy",
+    "detected_by": "Grafana alert 'UPI success rate < 90%'",
+    "impact": "UPI success rate 74% for 8 minutes; 312 customers received duplicate UPI collect requests.",
+    "symptoms": ["UPI success rate 74%", "NovaPay timeouts", "Circuit breaker still CLOSED after 6 minutes"],
+    "logs": "2026-07-12T20:31:12.004+05:30 level=warn msg=\"psp call timeout\" psp=novapay op=collect_request latency_ms=10001\n2026-07-12T20:34:40.771+05:30 level=info msg=\"breaker state\" psp=novapay state=CLOSED failure_ratio=0.41 window=5m threshold=0.50",
+    "timeline": [
+      {"at": "20:31", "event": "UPI success rate alert"},
+      {"at": "20:33", "event": "Manual payment-retry job triggered for failed transactions"},
+      {"at": "20:36", "event": "Customers report duplicate collect requests"},
+      {"at": "20:37", "event": "upi_psp_routing flipped to upixpress:100; retry job stopped"},
+      {"at": "20:39", "event": "Success rate 95%"},
+      {"at": "21:20", "event": "NovaPay recovered; routing restored; resolved"}
+    ],
+    "root_cause": "NovaPay degraded again. The circuit breaker added after INC-2150 used a 50% failure threshold over a 5-minute window, which was too slow to trip at a 41% failure ratio.",
+    "contributing_factors": ["Breaker threshold too conservative", "Payment-retry job run while the PSP was still degraded"],
+    "remediations": [
+      {"action": "Ran the manual payment-retry job while NovaPay was degraded", "command": "kubectl create job --from=cronjob/payment-retry payment-retry-manual -n payments", "outcome": "made_worse", "result": "312 customers received duplicate UPI collect requests.", "at": "20:33"},
+      {"action": "Flipped upi_psp_routing to upixpress:100", "command": "flagship set upi_psp_routing 'upixpress:100'", "outcome": "worked", "result": "Success rate recovered to 95% within 2 minutes.", "at": "20:37"}
+    ],
+    "action_items": [
+      {"item": "Lower breaker threshold to 25% failures over 60 seconds (payments-gateway v4.5)", "status": "done"},
+      {"item": "Block payment-retry job while any PSP breaker is open", "status": "open"}
+    ],
+    "related_change": null,
+    "fix_keywords": ["upi_psp_routing", "upixpress"]
+  },
+  {
+    "id": "INC-2245",
+    "title": "Login OTP SMS rejected by operators (DLT template mismatch)",
+    "service": "notification-svc",
+    "severity": "SEV2",
+    "started_at": "2026-07-19T18:02:00+05:30",
+    "resolved_at": "2026-07-19T19:10:00+05:30",
+    "responder": "Meera Iyer",
+    "detected_by": "Login success rate alert and customer support spike",
+    "impact": "62% of OTP SMS rejected for 68 minutes; new-user logins down 40%.",
+    "symptoms": ["SMS delivery callbacks REJECTED", "err_code DLT_TEMPLATE_MISMATCH"],
+    "logs": "2026-07-19T18:01:47.221+05:30 notification-svc warn sms.callback provider=smskart status=REJECTED err_code=DLT_TEMPLATE_MISMATCH template_id=1107168923451200981 sender=BBOLTN msisdn=+91XXXXXX4412",
+    "timeline": [
+      {"at": "18:02", "event": "Login success alert"},
+      {"at": "18:20", "event": "Switched SMS provider from SMSKart to TextNest, same rejections"},
+      {"at": "18:44", "event": "Traced to OTP copy change in notification-svc v3.9.0 not registered on DLT"},
+      {"at": "18:50", "event": "Reverted to registered template v7 and enabled WhatsApp OTP fallback"},
+      {"at": "19:10", "event": "Resolved"}
+    ],
+    "root_cause": "notification-svc v3.9.0 changed the OTP SMS text without re-registering the template on the TRAI DLT platform. Telecom operators scrub messages that do not match the registered template, so most OTPs were rejected.",
+    "contributing_factors": ["No DLT registration step in the release checklist"],
+    "remediations": [
+      {"action": "Switched SMS provider from SMSKart to TextNest", "command": "flagship set sms_provider textnest", "outcome": "failed", "result": "Same rejections, because DLT template scrubbing happens at the telecom operator, not the provider.", "at": "18:20"},
+      {"action": "Reverted the OTP SMS to registered template v7 and enabled WhatsApp OTP fallback", "command": "flagship set otp.sms.template_version v7 && flagship set otp_whatsapp_fallback on", "outcome": "worked", "result": "OTP delivery back to 98% within 10 minutes.", "at": "18:50"}
+    ],
+    "action_items": [
+      {"item": "DLT template registration check in notification-svc release checklist", "status": "done"}
+    ],
+    "related_change": "CHG-0718",
+    "fix_keywords": ["dlt", "template", "otp_whatsapp_fallback"]
+  },
+  {
+    "id": "INC-2266",
+    "title": "Kafka lag on inventory.updates again: poison record crashes consumers after WMS firmware update",
+    "service": "inventory-sync",
+    "severity": "SEV2",
+    "started_at": "2026-08-02T07:48:00+05:30",
+    "resolved_at": "2026-08-02T08:14:00+05:30",
+    "responder": "Arjun Mehta",
+    "detected_by": "Kafka consumer lag alert (> 200k)",
+    "impact": "Stale stock for about 26 minutes in Hyderabad; 2% cancellations.",
+    "symptoms": ["inventory-sync-consumer pods in CrashLoopBackOff", "Lag 640k on partition 5", "Auto-DLQ never triggered"],
+    "logs": "2026-08-02T07:47:31.880+05:30 inventory-sync-consumer-2 FATAL Fatal Python error: Segmentation fault (in google.protobuf.pyext decoding topic=inventory.updates partition=5 offset=90117734)\n2026-08-02T07:47:32.004+05:30 kubelet Back-off restarting failed container consumer in pod inventory-sync-consumer-2",
+    "timeline": [
+      {"at": "07:48", "event": "Lag alert"},
+      {"at": "07:52", "event": "Consumer pods restarted, crash loop continues"},
+      {"at": "07:58", "event": "Arjun recognises the INC-2178 pattern; poison record from HYD-KONDAPUR-02 after WMS firmware 5.2"},
+      {"at": "08:01", "event": "kafka-dlq-skip on partition 5 offset 90117734"},
+      {"at": "08:14", "event": "Lag drained; resolved"}
+    ],
+    "root_cause": "WMS firmware 5.2 at warehouse HYD-KONDAPUR-02 changed bundled-item encoding. The record crashed the protobuf C decoder with a segfault instead of raising a validation error, so the automatic DLQ added after INC-2178 never ran.",
+    "contributing_factors": ["Decoder crash bypassed retry/DLQ logic", "Vendor firmware updates are not announced"],
+    "remediations": [
+      {"action": "Restarted the inventory-sync consumer pods", "command": "kubectl rollout restart deploy/inventory-sync-consumer -n inventory", "outcome": "failed", "result": "Crash loop continued because the consumers re-read the same poison record.", "at": "07:52"},
+      {"action": "Moved the poison offset to the DLQ with kafka-dlq-skip", "command": "kafka-dlq-skip --topic inventory.updates --partition 5 --offset 90117734 --to-dlq", "outcome": "worked", "result": "Consumers stabilised and lag drained in 13 minutes.", "at": "08:01"}
+    ],
+    "action_items": [
+      {"item": "Decode in a subprocess guard so crashes route to DLQ", "status": "done"},
+      {"item": "Pin WMS firmware per warehouse; vendor must announce updates", "status": "open"}
+    ],
+    "related_change": "CHG-0730",
+    "fix_keywords": ["kafka-dlq-skip", "dlq", "poison"]
+  },
+  {
+    "id": "INC-2282",
+    "title": "orders-db CPU 98% at midnight: 11 CronJobs fire at 00:00 IST",
+    "service": "platform",
+    "severity": "SEV2",
+    "started_at": "2026-08-10T00:02:00+05:30",
+    "resolved_at": "2026-08-10T00:47:00+05:30",
+    "responder": "Farhan Siddiqui",
+    "detected_by": "RDS CPU > 90% alert and checkout-api latency alert",
+    "impact": "checkout-api p99 4s for 18 minutes during the midnight flash sale; about 900 failed orders, plus 2 minutes of full outage during an RDS failover.",
+    "symptoms": ["orders-db CPU 98%", "11 CronJobs started at 00:00", "checkout-api p99 4s"],
+    "logs": "2026-08-10T00:01:12+05:30 rds orders-db CPUUtilization=98.4 DatabaseConnections=412\n2026-08-10T00:01:15.330+05:30 checkout-api WARN SlowQuery 3812ms: UPDATE coupons SET status='EXPIRED' WHERE expires_at < now() (coupon-expiry job lock wait)",
+    "timeline": [
+      {"at": "00:02", "event": "RDS CPU and checkout latency alerts"},
+      {"at": "00:10", "event": "Instance class change db.r6g.2xlarge -> db.r6g.4xlarge applied immediately"},
+      {"at": "00:12", "event": "Multi-AZ failover: orders-db unavailable for about 2 minutes, all writes failed"},
+      {"at": "00:24", "event": "Identified 11 CronJobs (coupon-expiry, loyalty rollup, GST invoice batch, reports) all at 00:00 after the timezone clean-up"},
+      {"at": "00:30", "event": "Suspended non-critical jobs and moved GST invoice batch to the read replica"},
+      {"at": "00:47", "event": "Resolved; schedules staggered next morning"}
+    ],
+    "root_cause": "The CronJob timezone clean-up (CHG-0809) normalised 11 jobs to '0 0 * * *' Asia/Kolkata, creating a thundering herd on orders-db at midnight, which coincides with the daily flash sale.",
+    "contributing_factors": ["No review of combined schedule", "GST invoice batch ran on the primary"],
+    "remediations": [
+      {"action": "Changed orders-db instance class to db.r6g.4xlarge mid-incident", "command": "aws rds modify-db-instance --db-instance-identifier orders-db --db-instance-class db.r6g.4xlarge --apply-immediately", "outcome": "made_worse", "result": "Triggered a Multi-AZ failover with about 2 minutes of full database downtime.", "at": "00:10"},
+      {"action": "Suspended non-critical CronJobs, moved the GST invoice batch to the read replica and staggered schedules", "command": "kubectl patch cronjob loyalty-rollup -n growth -p '{\"spec\":{\"suspend\":true}}'", "outcome": "worked", "result": "CPU dropped to 55% within 6 minutes.", "at": "00:30"}
+    ],
+    "action_items": [
+      {"item": "Stagger CronJobs (00:00, 00:20, 00:40, 01:30, 02:10) and lint for schedule collisions", "status": "done"},
+      {"item": "Run reporting jobs on the read replica", "status": "done"}
+    ],
+    "related_change": "CHG-0809",
+    "fix_keywords": ["stagger", "suspend", "read replica"]
+  },
+  {
+    "id": "INC-2291",
+    "title": "Checkout 5xx 9.8%: HikariCP pool exhausted again during Independence Day sale",
+    "service": "checkout-api",
+    "severity": "SEV1",
+    "started_at": "2026-08-14T11:22:00+05:30",
+    "resolved_at": "2026-08-14T12:00:00+05:30",
+    "responder": "Nikhil Varma",
+    "incident_commander": "Vikram Rao",
+    "detected_by": "Grafana alert 'checkout-api 5xx rate > 2%'",
+    "impact": "9.8% of checkouts failed for 38 minutes during the Independence Day sale.",
+    "symptoms": ["checkout-api 5xx 9.8%", "HikariCP active=40/40 waiting=180", "Blocked UPDATE stock_levels statements"],
+    "logs": "2026-08-14T11:21:40.442+05:30 WARN  [http-nio-8080-exec-12] c.z.h.p.HikariPool : HikariPool-1 - Connection is not available, request timed out after 30000ms (total=40, active=40, idle=0, waiting=180)\n2026-08-14T11:21:40.450+05:30 ERROR c.b.checkout.api.StockReservationService : reserve failed sku=HYD01-004512 lock wait on stock_levels",
+    "timeline": [
+      {"at": "11:22", "event": "5xx alert; Nikhil Varma (new on-call) acknowledges"},
+      {"at": "11:28", "event": "Rolling restart of checkout-api"},
+      {"at": "11:33", "event": "Errors return after about 5 minutes"},
+      {"at": "11:47", "event": "Priya Raman joins, recognises INC-2104; manual 'reconcile --full' Argo workflow started at 11:15 by the inventory ops team"},
+      {"at": "11:51", "event": "Workflow stopped and idle-in-transaction sessions terminated"},
+      {"at": "11:54", "event": "Recovered"},
+      {"at": "12:00", "event": "Resolved"}
+    ],
+    "root_cause": "The inventory ops team manually started a full reconcile (Argo workflow reconcile-full) for the sale at 11:15. It took the same SELECT ... FOR UPDATE locks on stock_levels as the INC-2104 CronJob and left sessions idle in transaction. The INC-2104 action item to set idle_in_transaction_session_timeout was still open.",
+    "contributing_factors": ["INC-2104 action item still open", "New on-call engineer unaware of INC-2104", "Manual reconcile allowed during peak hours"],
+    "remediations": [
+      {"action": "Rolling restart of checkout-api", "command": "kubectl rollout restart deploy/checkout-api -n checkout", "outcome": "failed", "result": "Same as INC-2104: errors dropped for about 5 minutes, then returned because the locks were still held.", "at": "11:28"},
+      {"action": "Stopped the manual reconcile workflow and terminated idle-in-transaction sessions", "command": "argo stop reconcile-full-x7k2p -n inventory && psql -h orders-db -c \"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE state = 'idle in transaction' AND now() - state_change > interval '60 seconds';\"", "outcome": "worked", "result": "Pool recovered within 3 minutes.", "at": "11:51"}
+    ],
+    "action_items": [
+      {"item": "idle_in_transaction_session_timeout = '60s' set on role inventory_reconcile (applied 2026-08-20)", "status": "done"},
+      {"item": "Change ticket required for manual full reconcile between 10:00 and 23:00 IST", "status": "done"}
+    ],
+    "related_change": null,
+    "fix_keywords": ["reconcile", "idle in transaction", "pg_terminate_backend"]
+  },
+  {
+    "id": "INC-2305",
+    "title": "DNS i/o timeouts after EKS 1.32 upgrade: node-local-dns missing on new node group",
+    "service": "platform",
+    "severity": "SEV2",
+    "started_at": "2026-08-28T16:40:00+05:30",
+    "resolved_at": "2026-08-28T17:25:00+05:30",
+    "responder": "Arjun Mehta",
+    "detected_by": "Multiple service 5xx alerts",
+    "impact": "Pods scheduled on the new node group could not resolve DNS for 45 minutes; 3-7% 5xx across services.",
+    "symptoms": ["lookup ... on 169.254.20.10:53: i/o timeout", "Only pods on ng-general-v4 nodes affected"],
+    "logs": "2026-08-28T16:39:57.201+05:30 search-api: java.net.UnknownHostException: search-os.internal.basketbolt.in: Temporary failure in name resolution\n2026-08-28T16:40:03.118+05:30 checkout-api: dial tcp: lookup orders-db.internal.basketbolt.in on 169.254.20.10:53: read udp 10.4.40.7:38812->169.254.20.10:53: i/o timeout",
+    "timeline": [
+      {"at": "16:40", "event": "5xx alerts across services"},
+      {"at": "16:48", "event": "Scaled CoreDNS 6 -> 10 (the INC-2160 fix), no effect"},
+      {"at": "17:05", "event": "Noticed errors only on ng-general-v4 nodes; node-local-dns DaemonSet had 0 pods there"},
+      {"at": "17:12", "event": "Fixed DaemonSet nodeSelector"},
+      {"at": "17:25", "event": "Resolved"}
+    ],
+    "root_cause": "The node-local-dns DaemonSet had nodeSelector nodegroup=ng-general-v3. After the EKS upgrade moved workloads to ng-general-v4 it was not scheduled there, while kubelet still pointed pods at the node-local address 169.254.20.10, so DNS queries on new nodes went nowhere.",
+    "contributing_factors": ["DaemonSet pinned to a node group label", "Upgrade checklist did not verify DaemonSets"],
+    "remediations": [
+      {"action": "Scaled CoreDNS from 6 to 10 replicas (the INC-2160 fix)", "command": "kubectl scale deploy/coredns -n kube-system --replicas=10", "outcome": "failed", "result": "No effect: pods on new nodes were sending DNS to 169.254.20.10 where nothing was listening; CoreDNS capacity was not the problem.", "at": "16:48"},
+      {"action": "Fixed the node-local-dns DaemonSet nodeSelector so it runs on the new node group", "command": "kubectl patch ds node-local-dns -n kube-system --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/template/spec/nodeSelector\"}]'", "outcome": "worked", "result": "node-local-dns pods scheduled on all ng-general-v4 nodes; DNS recovered in 4 minutes.", "at": "17:12"}
+    ],
+    "action_items": [
+      {"item": "Upgrade checklist: verify all DaemonSets have desired == ready on new node groups", "status": "done"}
+    ],
+    "related_change": "CHG-0827",
+    "fix_keywords": ["node-local-dns", "nodeselector", "daemonset"]
+  },
+  {
+    "id": "INC-2317",
+    "title": "Checkout p99 latency 6.1s after config change: HikariCP maximumPoolSize 40 -> 20",
+    "service": "checkout-api",
+    "severity": "SEV2",
+    "started_at": "2026-09-03T12:10:00+05:30",
+    "resolved_at": "2026-09-03T12:41:00+05:30",
+    "responder": "Priya Raman",
+    "detected_by": "Alert 'checkout-api p99 > 2s'",
+    "impact": "Checkout p99 6.1s and 1.2% 5xx for 31 minutes during lunch.",
+    "symptoms": ["HikariCP total=20 active=20 waiting=95", "No idle-in-transaction sessions", "Started after checkout-api v5.12.0"],
+    "logs": "2026-09-03T12:09:48.610+05:30 WARN  [http-nio-8080-exec-33] c.z.h.p.HikariPool : HikariPool-1 - Connection is not available, request timed out after 30000ms (total=20, active=20, idle=0, waiting=95)",
+    "timeline": [
+      {"at": "12:10", "event": "Latency alert"},
+      {"at": "12:14", "event": "Suspended inventory-reconcile (pattern from INC-2104/INC-2291), no effect"},
+      {"at": "12:18", "event": "pg_stat_activity shows 0 idle-in-transaction sessions; noticed total=20 in Hikari logs"},
+      {"at": "12:24", "event": "Argo CD rollback to v5.11.4"},
+      {"at": "12:28", "event": "Latency normal"},
+      {"at": "12:41", "event": "Resolved"}
+    ],
+    "root_cause": "checkout-api v5.12.0 moved datasource settings into the shared library bb-spring-starter 2.3, which defaulted HikariCP maximumPoolSize to 20 instead of checkout's 40. Lunch traffic saturated the smaller pool.",
+    "contributing_factors": ["Shared library default silently overrode service config"],
+    "remediations": [
+      {"action": "Suspended the inventory-reconcile CronJob (INC-2104 playbook)", "command": "kubectl patch cronjob inventory-reconcile -n inventory -p '{\"spec\":{\"suspend\":true}}'", "outcome": "failed", "result": "No effect: reconcile was not running and pg_stat_activity showed no idle-in-transaction sessions. Always check pg_stat_activity before applying the INC-2104 fix.", "at": "12:14"},
+      {"action": "Rolled back checkout-api to v5.11.4 with Argo CD", "command": "argocd app rollback checkout-api 142", "outcome": "worked", "result": "Pool back to 40 connections; latency normal in 4 minutes.", "at": "12:24"}
+    ],
+    "action_items": [
+      {"item": "Set spring.datasource.hikari.maximum-pool-size=40 explicitly in checkout-api", "status": "done"},
+      {"item": "Alert when HikariCP total connections changes after a deploy", "status": "open"}
+    ],
+    "related_change": "CHG-0902",
+    "fix_keywords": ["rollback", "maximum-pool-size", "maximumpoolsize"]
+  },
+  {
+    "id": "INC-2340",
+    "title": "Payment webhooks rejected: HMAC signature mismatch after secret rotation",
+    "service": "payments-gateway",
+    "severity": "SEV2",
+    "started_at": "2026-09-19T10:05:00+05:30",
+    "resolved_at": "2026-09-19T10:58:00+05:30",
+    "responder": "Kavya Reddy",
+    "detected_by": "Alert 'orders stuck in PAYMENT_PENDING > 500'",
+    "impact": "2,140 paid orders stuck in PAYMENT_PENDING for up to 50 minutes; customers charged but orders not confirmed.",
+    "symptoms": ["webhook signature verification failed", "PAYMENT_PENDING backlog growing", "Only UPIxpress webhooks affected"],
+    "logs": "2026-09-19T10:04:58.337+05:30 level=error msg=\"webhook signature verification failed\" psp=upixpress kid=whsec_2026_09 expected_kid=whsec_2026_06 path=/webhooks/upixpress",
+    "timeline": [
+      {"at": "10:05", "event": "PAYMENT_PENDING backlog alert"},
+      {"at": "10:18", "event": "Found kid mismatch: pods still using the June secret"},
+      {"at": "10:22", "event": "Rolling restart of payments-gateway to load the new secret"},
+      {"at": "10:27", "event": "Webhooks verified again"},
+      {"at": "10:41", "event": "Replayed webhooks for 10:00-10:41 from the UPIxpress dashboard"},
+      {"at": "10:58", "event": "Backlog cleared; resolved"}
+    ],
+    "root_cause": "The quarterly rotation (CHG-0918) updated the UPIxpress webhook secret in the PSP dashboard and in Vault, but payments-gateway only reads secrets at startup, so running pods kept verifying with the old key.",
+    "contributing_factors": ["No secret hot-reload", "Rotation runbook did not include a restart step"],
+    "remediations": [
+      {"action": "Rolling restart of payments-gateway so pods load the rotated secret", "command": "kubectl rollout restart deploy/payments-gateway -n payments", "outcome": "worked", "result": "New pods loaded whsec_2026_09 and webhook verification succeeded. Here a restart was the correct fix because the secret is only read at startup.", "at": "10:22"},
+      {"action": "Replayed missed webhooks from the UPIxpress dashboard for the incident window", "command": "UPIxpress dashboard > Webhooks > Replay 10:00-10:41 IST", "outcome": "worked", "result": "All 2,140 pending orders confirmed.", "at": "10:41"}
+    ],
+    "action_items": [
+      {"item": "Hot-reload secrets from Vault agent in payments-gateway", "status": "open"},
+      {"item": "Add rollout restart and replay steps to the rotation runbook", "status": "done"}
+    ],
+    "related_change": "CHG-0918",
+    "fix_keywords": ["rollout restart", "replay", "secret"]
+  }
+]
